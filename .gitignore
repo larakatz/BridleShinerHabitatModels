@@ -1,0 +1,34 @@
+<<<<<<< HEAD
+.Rproj.user
+.Ruserdata
+
+# History files
+.Rhistory
+.Rapp.history
+
+# Session Data files
+.RData
+.RDataTmp
+
+# CART results
+evaluations.csv
+full_dataset_evals.csv
+HighestPruneAccuracy-ModelC.tif
+HighestPruneAccuracy-ModelD.tif
+HighestPruneAccuracy1.jpg
+HighestPruneAccuracy2.jpg
+HighestSensitivity-ModelA.tif
+HighestSensitivity-ModelB.tif
+HighestSensitivity1.jpg
+HighestSensitivity2.jpg
+LocalHabitatCART2.Rmd
+ModelAsummary.JPG
+ModelAsummarystats.csv
+ModelBsummarystats.csv
+ModelCsummary.JPG
+ModelCsummarystats.csv
+ModelDsummarystats.csv        
+top_model_predict.csv    
+=======
+LocalHabitatCART2.Rmd
+>>>>>>> 6ca4fc17228f624169ecf0702cc7c5553687fe9a
