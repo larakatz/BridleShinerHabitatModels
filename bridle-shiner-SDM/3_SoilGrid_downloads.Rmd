@@ -1,0 +1,246 @@
+---
+title: "Download SoilGrid rasters"
+author: "Lara Katz"
+date: "2024-05-06"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# install.packages('XML')
+# install.packages('rgdal')
+# install.packages('gdalUtils')
+# install.packages('sf')
+# install.packages('dplyr')
+# devtools::install_github("envirometrix/landmap")
+# install.packages(leaflet)
+# install.packages(mapview)
+# library(devtools)
+# devtools::install_github("https://github.com/be-marc/leaflet.opacity", dependencies=T)
+library(XML)
+library(rgdal)
+library(gdalUtilities)
+library(raster)
+library(sf)
+library(dplyr)
+library(RColorBrewer)
+library(leaflet)
+library(leaflet.opacity)
+library(mapview)
+```
+
+Make bounding box and get coordinates
+```{r}
+# Bounding box 
+bbcoordsst <- st_read("./datos/BoundingBoxHomolosine.shp")
+igh='+proj=igh +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs' # proj string for Homolosine projection
+ne_igh <- st_transform(bbcoordsst, igh)
+
+(bbox <- st_bbox(ne_igh))
+# xmin     ymin     xmax     ymax 
+#-9137229  4520021 -8362878  5390855
+```
+
+Use the bbox data to define the boundary box limits as used by GDAL
+```{r}
+## ul means upper left
+## lr means lower right
+ulx = bbox$xmin
+uly = bbox$ymax
+lrx = bbox$xmax
+lry = bbox$ymin
+
+(bb <- c(ulx, uly, lrx, lry))
+#     xmin     ymax     xmax     ymin 
+# -9137229  5390855 -8362878  4520021 
+```
+SoilGrids maps have associated uncertainties as any product derived from a modelling approach. The prediction uncertainty is quantified by probability distributions. For each property and each standard depth interval this distribution is characterised by four parameters as follows:
+Q0.05 - 5% quantile;
+Q0.50 - median of the distribution;
+mean - mean of the distribution;
+Q0.95 - 95% quantile.
+
+## Clay content raster:
+
+Define variable of interest, depth, and quantile:
+```{r}
+voi = "clay" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+
+(layer = paste(voi, paste(voi,depth,quantile, sep="_"), sep = "/")) # layer of interest 
+
+(vrt_layer = paste(layer, '.vrt', sep=""))
+```
+
+Use the gdal_translate function to download the clay layer.
+```{r}
+sg_url="/vsicurl/https://files.isric.org/soilgrids/latest/data/"
+lfile = "./datos/clay_ntest_igh_0_5.vrt"
+```
+
+Obtain a VRT for the area of interest in the Homolosine projection. We suggest to use VRT for the intermediate steps to save space and computation times.
+```{r}
+gdal_translate(paste0(sg_url,vrt_layer), lfile ,
+               of = "VRT",
+               tr=c(250,250), # data is 250m x 250m
+               projwin=bb,
+               projwin_srs =igh)
+```
+
+Change projection to NAD83 / 19N
+```{r}
+gdalwarp(lfile,
+         "./datos/clay_19N.vrt", 
+         s_srs=igh, 
+         t_srs="EPSG:26919", 
+         of="VRT",
+         overwrite = TRUE)
+```
+
+Make final Geotiff
+```{r}
+gdal_translate("./datos/clay_19N.vrt",  
+               "./datos/clay_19N.tif", 
+               co=c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"))
+```
+
+## Silt raster
+
+Define variable of interest, depth, and quantile 
+```{r}
+voi = "silt" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+
+(layer = paste(voi, paste(voi,depth,quantile, sep="_"), sep = "/")) # layer of interest 
+
+(vrt_layer = paste(layer, '.vrt', sep=""))
+```
+
+Use the gdal_translate function to download the silt layer.
+```{r}
+sg_url="/vsicurl/https://files.isric.org/soilgrids/latest/data/"
+lfile = "./datos/silt_igh_0_5.vrt"
+```
+
+Obtain a VRT for the area of interest in the Homolosine projection. Use VRT for the intermediate steps to save space and computation times.
+```{r}
+gdal_translate(paste0(sg_url,vrt_layer), lfile ,
+               of = "VRT",
+               tr=c(250,250), # data is 250m x 250m
+               projwin=bb,
+               projwin_srs =igh)
+```
+
+Change projection to NAD83 / 19N
+```{r}
+gdalwarp(lfile,
+         "./datos/silt_19N.vrt", 
+         s_srs=igh, 
+         t_srs="EPSG:26919", 
+         of="VRT",
+         overwrite = TRUE)
+```
+
+Make final Geotiff
+```{r}
+gdal_translate("./datos/silt_19N.vrt",  
+               "./datos/SiltContent_19N.tif", 
+               co=c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"))
+```
+
+# Sand raster
+
+Define variable of interest, depth, and quantile 
+```{r}
+voi = "sand" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+
+(layer = paste(voi, paste(voi,depth,quantile, sep="_"), sep = "/")) # layer of interest 
+
+(vrt_layer = paste(layer, '.vrt', sep=""))
+```
+
+Use the gdal_translate function to download the sand layer.
+```{r}
+sg_url="/vsicurl/https://files.isric.org/soilgrids/latest/data/"
+lfile = "./datos/sand_igh_0_5.vrt"
+```
+
+Obtain a VRT for the area of interest in the Homolosine projection. Use VRT for the intermediate steps to save space and computation times.
+```{r}
+gdal_translate(paste0(sg_url,vrt_layer), lfile,
+               of = "VRT",
+               tr=c(250,250), # data is 250m x 250m
+               projwin=bb,
+               projwin_srs =igh)
+```
+
+Change projection to NAD83 / 19N
+```{r}
+gdalwarp(lfile,
+         "./datos/sand_19N.vrt", 
+         s_srs=igh, 
+         t_srs="EPSG:26919", 
+         of="VRT",
+         overwrite = TRUE)
+```
+
+Make final Geotiff
+```{r}
+gdal_translate("./datos/sand_19N.vrt",  
+               "./datos/SandContent_19N.tif", 
+               co=c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"))
+```
+
+# Coarse fragments raster
+
+Define variable of interest, depth, and quantile:
+```{r}
+voi = "cfvo" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+
+(layer = paste(voi, paste(voi,depth,quantile, sep="_"), sep = "/")) # layer of interest 
+
+(vrt_layer = paste(layer, '.vrt', sep=""))
+```
+
+Use the gdal_translate function to download the coarse fragments layer.
+```{r}
+sg_url="/vsicurl/https://files.isric.org/soilgrids/latest/data/"
+lfile = "./datos/cfvo_igh_0_5.vrt"
+```
+
+Obtain a VRT for the area of interest in the Homolosine projection. Use VRT for the intermediate steps to save space and computation times.
+```{r}
+gdal_translate(paste0(sg_url,vrt_layer), lfile ,
+               of = "VRT",
+               tr=c(250,250), # data is 250m x 250m
+               projwin=bb,
+               projwin_srs =igh)
+```
+
+Change projection to NAD83 / 19N
+```{r}
+gdalwarp(lfile,
+         "./datos/CoarseFrag_19N.vrt", 
+         s_srs=igh, 
+         t_srs="EPSG:26919", 
+         of="VRT",
+         overwrite = TRUE)
+```
+
+Make final Geotiff:
+```{r}
+gdal_translate("./datos/CoarseFrag_19N.vrt",  
+               "./datos/CoarseFrag_19N.tif", 
+               co=c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"))
+
+```
+

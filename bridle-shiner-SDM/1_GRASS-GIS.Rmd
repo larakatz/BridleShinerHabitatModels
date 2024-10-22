@@ -1,0 +1,378 @@
+---
+title: "GRASS-GIS tutorial"
+author: "Lara Katz"
+date: "2024-05-07"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Libraries
+```{r message=FALSE}
+# install.packages("rgrass") # rgrass7 in tutorial but rgrass is the new version
+# install.packages("link2GI")
+library(rgrass)
+library(link2GI)
+library(tmap)
+library(dplyr)
+library(terra)
+library(sf)
+```
+
+# Set up GRASS workspace
+
+```{r}
+filepath <- "D:/GRASS GIS 8.3/"
+projectpath <- "D:/GRASS GIS 8.3/NortheastDEM/"
+rgrass::initGRASS(gisBase = filepath, gisDbase = projectpath, mapset = "PERMANENT")
+stringexecGRASS("g.proj -c --quiet epsg=26919") # set projection
+```
+
+### Notes on GRASS:
+
+**Sources:** 
+* https://florisvdh.github.io/presentations/20210617_grass/
+
+* https://baharmon.github.io/watersheds-in-grass
+
+* https://www.youtube.com/watch?v=y4mz_nt1TaU
+
+**Wrapper functions:**
+Run GRASS commands in R:
+`execshell("g.proj -c --quiet epsg=31370")`
+`stringexecGRASS("g.proj -c --quiet epsg=31370")` 
+
+Breaking up command as arguments of execGRASS():
+`execGRASS("g.proj", flags = c("c", "quiet"), epsg = 31370)`
+`execshell()`: advantage of accepting entire GRASS script; supports maximum number of commands
+`rgrass7::execGRASS()`: advantage that the GRASS command parameters can be more easily programmed in R
+`rgrass7::stringexecGRASS()`: advantage of using original GRASS syntax (e.g. copied from GRASS session), while following rgrass7 philosophy of handling user input in R
+
+Set to using either `sp` or `sf+stars` with `use_sp()` or `use_sf()` (although this doesn't seem to work with the new package version).
+
+# Load and combine DEM rasters
+
+Download and import DEM rasters from TNM:
+```{r}
+# files <- list.files(path = projectpath,
+#                     pattern = "HUC6_10m",
+#                     all.files = TRUE,
+#                     full.names = TRUE,
+#                     include.dirs = FALSE)
+# 
+# for (i in 1:length(files)){
+#   stringexecGRASS(paste0(paste0(paste0("r.import resample=bilinear input='",files[i]), "' output=dem"), i))
+# }
+stringexecGRASS(paste0(paste0("r.import resample=bilinear input='",projectpath), "Elevation_HUC6_30m.tif' output=Elevation_HUC6_30m")) # no need to reproject, already in UTM 19N
+```
+
+
+Patch DEM rasters together:
+```{r}
+# rasters <- "dem1@PERMANENT"
+# for (i in 2:length(files)){
+#   rasters <- paste(rasters, paste0(paste0("dem",i), "@PERMANENT"), sep = ",")
+# }
+# rasters
+# 
+# stringexecGRASS(paste0(paste0("r.patch --overwrite input=", rasters), " output=DEM_all@PERMANENT"))
+```
+
+Export raster into R:
+```{r}
+# stringexecGRASS(paste0(paste0("r.out.gdal input=DEM_all@PERMANENT output=", projectpath), "DEM_all.tif"))
+```
+
+# Extent shapefile
+
+Load shapefile of 200km buffer around Saco and Merrimack HUC6
+```{r}
+range <- vect("./Inputs_raw/SacoMerrimackHUC6.shp")
+range <- project(range, y = "epsg:26919") # EPSG for NAD83 / UTM Zone 19N
+range <- aggregate(range, dissolve = TRUE) # dissolve into 1 feature
+range.buff50 <- terra::buffer(range, 50000)
+writeVector(range.buff50,paste0(projectpath, "SacoMerrimack50kmbuff.shp"))
+range.buff100 <- terra::buffer(range, 100000) # buffer to 200,000m or 200km
+writeVector(range.buff100,paste0(projectpath, "SacoMerrimack100kmbuff.shp"))
+
+extent <- st_read(paste0(projectpath, "SacoMerrimack100kmbuff.shp"))
+# canada <- st_read(paste0(projectpath, "Canada_mask_bbox.shp"))
+```
+
+
+Use HUC10 polygons from Maine, New Hampshire, and New York within WBD01 and a 100km buffer of the Saco and Merrimack HUC6s (GRASS can't compute anything larger than this)
+```{r}
+# Maine, NH, MA
+hucs_east1 <- st_read("WBD_01_HU2_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+hucs_east <- hucs_east1[extent,] %>% st_union(.) %>% st_as_sf(.)
+# hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
+plot(hucs_east[1])
+
+# # NY, VT, MA
+# hucs_south1 <- st_read("./Shape/WBDHU10.shp") %>% st_transform(.,crs=st_crs(extent))
+# # hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_south <- hucs_south1[extent,] %>% st_union(.) %>% st_as_sf(.)
+# # hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
+# plot(hucs_south[1])
+# # Massachusetts
+# # hucs_ma1 <- st_read("NHD_H_Massachusetts_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# # hucs_ma <- hucs_ma1[extent,] # within buffer
+# #   # st_union(.) %>% st_as_sf(.)
+# 
+# hucs_west1 <- st_read("./WBD_04_HU2_Shape/Shape/WBDHU10.shp") %>% st_transform(.,crs=st_crs(extent))
+# # hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_west <- hucs_west1[extent,] %>% st_union(.) %>% st_as_sf(.)
+# # hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
+# plot(hucs_west[1])
+
+
+# # New Hampshire
+# hucs_nh1 <- st_read("NHD_H_New_Hampshire_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_nh <- hucs_nh1[extent,] # within buffer
+#   # st_union(.) %>% st_as_sf(.)
+#   
+# # New York
+# hucs_ny1 <- st_read("NHD_H_New_York_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_ny <- hucs_ny1[extent,] # within buffer
+# # hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson") 
+#   # st_union(.) %>% st_as_sf(.)
+# 
+# # Vermont
+# hucs_vt1 <- st_read("NHD_H_Vermont_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_vt <- hucs_vt1[extent,] # within buffer
+# hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson") 
+  # st_union(.) %>% st_as_sf(.)
+
+hucs <- dplyr::bind_rows(list(hucs_south,hucs_west,hucs_east)) %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
+
+hucs <- hucs_east %>% vect(.) %>% fillHoles(.)
+plot(hucs)
+#   dplyr::bind_rows(list(hucs_me,hucs_nh,hucs_ny)) %>% st_union(.) %>% st_as_sf(.)
+# plot(hucs)
+# hucs1 <- hucs %>% filter(name == "Saco" | name == "Merrimack" | name == "Connecticut" | name == "Androscoggin" | name == "Connecticut Coastal" | name == "Massachusetts-Rhode Island Coastal" | name == "Maine Coastal" | name == "Kennebec") %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
+# 
+# 
+# hucs2 <- hucs %>% filter(name == "Penobscot" | name == "Lower Saint Lawrence River" | name == "Middle Saint Lawrence River" | name == "Upper Saint Lawrence River" | name == "Upper Hudson" | name == "Lower Hudson-Long Island") %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
+# 
+# plot(hucs1)
+# plot(hucs2)
+
+bbox <- st_as_sfc(st_bbox(hucs))
+plot(bbox)
+st_write(bbox,paste0(projectpath, "bbox.shp"), append=F)
+```
+
+Import extent shapefile:
+```{r}
+stringexecGRASS(paste0(paste0("v.import --overwrite input='", projectpath),"bbox.shp' layer=bbox output=BoundingBox"))
+```
+
+Set computational region:
+```{r}
+stringexecGRASS("g.region vector=BoundingBox@PERMANENT")
+```
+
+
+Clip top of HUCs along Canadian border since the elevation data is all NA there
+```{r}
+# hucs.mask <- vect(hucs)
+# # canada.v <- vect(canada)
+# # 
+# # hucs.clip <- erase(hucs.v, canada.v)
+# # 
+# # plot(hucs.clip)
+# writeVector(hucs.mask,paste0(projectpath, "HUC4.shp"), overwrite=T)
+# 
+# hucs.mask <- vect(paste0(projectpath, "HUC4.shp"))
+```
+
+Load DEM:
+```{r}
+dem <- rast(paste0(projectpath, "Elevation_HUC6_30m.tif"))
+nrow <- nrow(dem)
+ncol <- ncol(dem) 
+```
+
+
+Make a mask raster for each HUC4
+```{r}
+# for (i in 1:nrow(hucs.mask)){
+#   r <- rast(hucs.mask[i],nrows=nrow, ncols=ncol) # empty raster the size of the DEM raster
+#   z <- rasterize(hucs.mask[i], r, "name")
+#   align <- resample(z, dem)
+#   crop <- crop(align, ext(hucs.mask[i]))
+#   writeRaster(crop, paste0(paste0(paste0(projectpath, "HUC4-"), hucs.mask[i]$huc4), ".tif"), overwrite=T)
+# }
+
+r <- rast(hucs,nrows=nrow,ncols=ncol)
+z <- rasterize(hucs, r)
+align <- resample(z, dem)
+crop <- crop(align, ext(hucs))
+writeRaster(crop, paste0(projectpath, "HUC10-100km.tif"), overwrite=T)
+plot(crop)
+# r <- rast(hucs2,nrows=nrow,ncols=ncol)
+# z <- rasterize(hucs2, r)
+# align <- resample(z, dem)
+# crop <- crop(align, ext(hucs2))
+# writeRaster(crop, paste0(projectpath, "HUC4-OuterHUCs.tif"), overwrite=T)
+# test <- rast("D:/GRASS GIS 8.3/NortheastDEM/HUC6-020302.tif")
+# summary(test)
+```
+
+# Watershed creation with `r.watershed`
+
+Source: Brendan Harmon's tutorial (https://baharmon.github.io/watersheds-in-grass) with modifications for GRASS 8.3
+
+Create hillshade (optional):
+```{r}
+# stringexecGRASS("r.relief input=DEM_all@PERMANENT output=Relief zscale=3")
+# stringexecGRASS("r.shade shade=Relief@PERMANENT color=DEM_all@PERMANENT output=shaded_relief")
+```
+
+Make a test watershed map at a coarse scale:
+```{r}
+# for (i in 1:nrow(hucs.mask)){
+#   # Import mask raster
+#   stringexecGRASS(paste0(paste0(paste0(paste0(paste0(paste0("r.import --overwrite resample=nearest input='", projectpath), "HUC4-"), hucs.mask[i]$huc4), ".tif' output="), "HUC4_"), hucs.mask[i]$huc4))
+#   
+#   # Mask 
+#   stringexecGRASS("r.mask -r") # remove any existing mask
+#   stringexecGRASS(paste0(paste0("r.mask raster=HUC4_", hucs.mask[i]$huc4), "@PERMANENT")) # set new mask
+# 
+#   # Set computational region
+#   stringexecGRASS(paste0(paste0("g.region raster=HUC4_", hucs.mask[i]$huc4), "@PERMANENT"))
+#   
+#   # Calculate watersheds
+#   stringexecGRASS(paste0(paste0("r.watershed --overwrite elevation=Elevation_HUC6_30m@PERMANENT threshold=400 basin=hucs_", hucs.mask[i]$huc4), "_400 memory=2100") )
+#   
+#   stringexecGRASS(paste0(paste0(paste0(paste0("r.to.vect -- overwrite input=hucs_", hucs.mask[i]$huc4), "_400@PERMANENT output=hucs_"), hucs.mask[i]$huc4), "_400polys type=area")) # 200 is very small: smaller than HUC14
+#   
+#   # Export shapefiles
+#   stringexecGRASS(paste0(paste0(paste0(paste0(paste0(paste0("v.out.ogr -e -m --overwrite input=hucs_", hucs.mask[i]$huc4), "_400polys@PERMANENT type=area output='"), projectpath), "hucs_"), hucs.mask[i]$huc4), "_400polys.shp' format=ESRI_Shapefile")) # export as multifeatures (-m), use ESRI-style .prj format (-e)
+#   
+#   }
+```
+
+
+HUCs
+```{r}
+# Import mask raster
+stringexecGRASS(paste0(paste0("r.import --overwrite resample=nearest input='", projectpath), "HUC10-100km.tif' output=HUC10_100km"))
+  
+# Mask 
+stringexecGRASS("r.mask -r") # remove any existing mask
+stringexecGRASS("r.mask raster=HUC10_100km@PERMANENT") # set new mask
+
+# Set computational region
+stringexecGRASS("g.region raster=HUC10_100km@PERMANENT")
+```
+
+Smallest Maine HUC12 (ignoring islands) is 6.42km2, which would equal approximately 7133 raster cells. Smallest HUC14 is 1.51km2, or 1677 raster cells. So the minimum threshold size for the smaller 
+```{r}
+hucs_12.1 <- st_read("WBD_01_HU2_GDB.gdb", layer="WBDHU12") %>% st_transform(.,crs=st_crs(extent))
+huc12 <- hucs_12.1[which(!grepl("-Atlantic Ocean",hucs_12.1$name)),] # ignore islands
+# hucs_nh12.1 <- st_read("NHD_H_New_Hampshire_State_GDB.gdb", layer="WBDHU12") %>% st_transform(.,crs=st_crs(extent))
+# hucs_nh12 <- hucs_nh12.1[which(grepl("-Atlantic Ocean",hucs_me12.1$name) | grepl("Island", hucs_me12.1$name)),] # ignore islands
+# huc12_MENH <- dplyr::bind_rows(list(hucs_me12,hucs_nh12)) %>% st_union(.,by_feature=T) %>% st_as_sf(.)
+plot(huc12["name"])
+hucs_me14.1 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU14") %>% st_transform(.,crs=st_crs(extent)) # includes NH
+huc12minarea <- min(huc12$areasqkm)
+huc14minarea <- min(hucs_me14.1$areasqkm)
+
+huc12meanarea <- mean(huc12$areasqkm) # corresponds closest to threshold 12800 in Friedrichs-Manthey et al. 2020
+huc14meanarea <- mean(hucs_me14.1$areasqkm) # between thresholds 1600 and 3200 in above paper (using 90mx90m cells)
+
+cellarea <- 30*30 # 1 elevation raster cell in m2
+m2perkm2 <- 1000*1000 # conversion from km2 to m2
+
+(huc14minarea*m2perkm2)/cellarea # min threshold value about 1677 cells
+(huc12minarea*m2perkm2)/cellarea # min threshold value about 7133 cells
+
+```
+
+
+
+```{r}
+scale <- 14400 # minimum number of cells required to initiate a river
+
+# Calculate watersheds
+stringexecGRASS(paste0(paste0(paste0(paste0("r.watershed -s -b --overwrite elevation=Elevation_HUC6_30m@PERMANENT threshold=", scale), " basin=hucs_100km_"), scale), "sb slope_steepness= hucs_100km_steepness memory=2100")) # D8 flow like in ArcGIS Pro (-s), beautify flat areas (-b)
+
+# Vectorize watersheds
+stringexecGRASS(paste0(paste0(paste0(paste0("r.to.vect -s --overwrite input=hucs_100km_", scale), "b@PERMANENT output=hucs_100km_"), scale), "polysbs type=area")) # 200 is very small: smaller than HUC14, smooth corners (-s)
+
+# Export shapefiles
+stringexecGRASS(paste0(paste0(paste0(paste0(paste0(paste0("v.out.ogr -e -m --overwrite input=hucs_100km_", scale), "polysbs@PERMANENT type=area output='"), projectpath), "hucs_100km_"), scale),"polysbs.shp' format=ESRI_Shapefile")) # export as multifeatures (-m), use ESRI-style .prj format (-e)
+```
+
+Calculate the area of the new watersheds:
+```{r}
+wsheds <- st_read(paste0(projectpath, "hucs_100km_14400polysbs.shp"))
+area <- st_area(wsheds, by_feature=T)
+areasqkm <- area/m2perkm2
+wsheds$areasqkm <- areasqkm
+mean(areasqkm) # somewhere between fine scale and intermediate scale
+sd(areasqkm)
+```
+
+Clip coastal watersheds
+```{r}
+range.buff50.sf <- st_as_sf(range.buff50)
+ocean <- vect("./Intermediate/Marine_habitats.shp")
+ocean.buff <- buffer(ocean,10000)
+
+ocean.sf <- st_read(("./Intermediate/Marine_habitats.shp"))
+
+huc12_clip <- huc12[range.buff50.sf,]
+# huc12_clip <- huc12_clip1[ocean.sf,] %>% dplyr::select(huc12, name)
+st_write(huc12_clip, "./Intermediate/huc12_coast.shp", append=F)
+
+wsheds_clip1 <- wsheds[huc12_clip,]
+wsheds_clip <- wsheds_clip1 %>% vect(.) %>% erase(.,ocean) %>% st_as_sf(.)
+wsheds_clipv <- vect(wsheds_clip)
+st_write(wsheds_clip, "./Intermediate/watersheds_clip.shp", append = F)
+
+land <- erase(ocean.buff,ocean)
+coast <- erase(land, wsheds_clipv) %>% st_as_sf(.) %>% st_cast(.,"POLYGON")
+coast.50 <- coast[range.buff50.sf,]
+ 
+st_write(coast.50, "./Intermediate/coastal_hucs.shp", append=F)
+
+small_hucs <- dplyr::bind_rows(list(wsheds_clip,coast.50))
+
+st_write(small_hucs,"./Intermediate/small_hucs.shp", append=F)
+small_hucs$label <- c(paste0("huc000", 1:9), 
+                      paste0("huc00", 10:99),
+                      paste0("huc0", 100:999),
+                      paste0("huc", 1000:nrow(small_hucs)))
+
+large_hucs <- huc12_clip %>% dplyr::select(huc12,name,areasqkm)
+large_hucs$label <- c(paste0("huc12-00", 1:9), 
+                      paste0("huc12-0", 10:99),
+                      paste0("huc12-", 100:nrow(large_hucs)))
+
+st_write(small_hucs, "./Inputs_vectors/small_hucs.shp", append=F)
+st_write(large_hucs, "./Inputs_vectors/large_hucs.shp", append=F)
+
+plot(small_hucs["value"])
+plot(huc12_clip["states"])
+```
+
+
+Missing areas?
+```{r}
+# wsheds_clipv <- vect(wsheds_clip)
+# huc12_clipv <- vect(huc12_clip)
+# 
+# missing <- erase(huc12_clipv, wsheds_clipv)# parts of HUC12 that are not ocean but were not estimated by GRASS
+# missing_coast <- missing[ocean,]
+# 
+# plot(missing)
+# writeVector(missing,"./Intermediate/MissingAreas.shp", overwrite=T)
+```
+
+
+

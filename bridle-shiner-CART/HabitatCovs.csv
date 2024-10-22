@@ -1,0 +1,96 @@
+Site,conductivity,dams,dom.substrate,prop.org.subst,prop.large.subst,prop.sm.subst,TDS,WBType
+ANDROS,110.8,0,F - Silt or fine powdery inorganic material,0.4,0.05,0.55,78.4,StreamRiver
+BARKER,97.8,1,M - Mud or decomposed organic material,1,0,0,69.4,LakePond
+BEARPD-01,63.5,1,M - Mud or decomposed organic material,0.9,0,0.1,45.7,LakePond
+BEARPD-02,54.1,1,"S - Sand or granular material <1/16""",0.35,0.05,0.6,38.5,LakePond
+BOOMBR,242,0,C - Clay,0.1,0.6,0.3,173,StreamRiver
+BRADPD-01,35,0,M - Mud or decomposed organic material,1,0,0,25,LakePond
+BRADPD-02,24,0,M - Mud or decomposed organic material,1,0,0,17.5,LakePond
+BROBRK,NA,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.9,0,0.1,NA,StreamRiver
+BUCKBR,38.4,0,M - Mud or decomposed organic material,1,0,0,27.3,StreamRiver
+BUFFBR,74.6,1,M - Mud or decomposed organic material,0.9,0.1,0,53,StreamRiver
+BURNPD-01,52.6,1,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.7,0,0.3,37.1,LakePond
+BURNPD-02,53.2,1,M - Mud or decomposed organic material,0.6,0.15,0.25,37.8,LakePond
+CARBRK,98.3,0,"S - Sand or granular material <1/16""",0.01,0.39,0.6,69.8,StreamRiver
+CHANBR,117.7,0,F - Silt or fine powdery inorganic material,0.05,0,0.95,83.9,StreamRiver
+COLCPD-01,29.4,2,M - Mud or decomposed organic material,0.5,0.05,0.45,20.8,LakePond
+COLCPD-02,28.3,0,M - Mud or decomposed organic material,1,0,0,20.2,StreamRiver
+CRESLK-01,93.4,0,M - Mud or decomposed organic material,0.7,0.1,0.2,66.3,StreamRiver
+CRESLK-02,93,0,M - Mud or decomposed organic material,1,0,0,66,LakePond
+CRESLK-03,96.2,1,"S - Sand or granular material <1/16""",0.4,0,0.6,68.3,LakePond
+CROOKN,64.5,2,"S - Sand or granular material <1/16""",0.2,0.3,0.5,45.7,StreamRiver
+CROOKR,61.2,1,F - Silt or fine powdery inorganic material,0.3,0.1,0.6,43.4,StreamRiver
+CROOKS,68.3,0,"S - Sand or granular material <1/16""",0.3,0,0.7,48.4,StreamRiver
+DINGLY,100.1,1,"S - Sand or granular material <1/16""",0.1,0.7,0.2,71.2,StreamRiver
+DUCKIN,46.9,1,M - Mud or decomposed organic material,0.7,0.3,0,33.3,StreamRiver
+DUCKNO,47.4,1,"O - Cobble rocks 2.5-10""",0.1,0.6,0.3,33.3,StreamRiver
+EDDYBR,203,1,M - Mud or decomposed organic material,0.95,0.02,0.03,145,StreamRiver
+GRTBRK,96.7,0,M - Mud or decomposed organic material,1,0,0,69.2,StreamRiver
+GWORKB,184.1,2,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.9,0.1,0,131,StreamRiver
+GWORKN,289,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.5,0.5,0,206,StreamRiver
+GWORKS,164.7,3,"O - Cobble rocks 2.5-10""",0.6,0.4,0,117,StreamRiver
+HEATH-01,61,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0,0.4,0.6,43.4,LakePond
+HEATH-02,53.3,0,M - Mud or decomposed organic material,1,0,0,37.8,LakePond
+HIGHLK-02,48.4,1,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.9,0.1,0,34.2,LakePond
+HIGHLK-03,47.8,2,M - Mud or decomposed organic material,0.8,0,0.2,33.5,LakePond
+HIGHLK-04,49.4,0,M - Mud or decomposed organic material,0.9,0.1,0,35,LakePond
+INGALS-01,47.9,1,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,33.9,LakePond
+INGALS-02,46.1,1,M - Mud or decomposed organic material,1,0,0,32.6,LakePond
+JORDAN,142,1,M - Mud or decomposed organic material,0.6,0.2,0.2,100.9,StreamRiver
+JOSIES,77.5,0,M - Mud or decomposed organic material,1,0,0,53.8,StreamRiver
+KIMBAL,33.3,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.9,0.05,0.05,23.5,StreamRiver
+LITTLR,78.7,0,"S - Sand or granular material <1/16""",0.1,0.7,0.2,58.3,StreamRiver
+MARBRK,56,0,M - Mud or decomposed organic material,0.7,0.3,0,39.9,StreamRiver
+MARRPD-01,79.2,0,M - Mud or decomposed organic material,1,0,0,56.4,LakePond
+MARRPD-02,79,0,M - Mud or decomposed organic material,1,0,0,55.9,LakePond
+MEADBR,129.9,0,"S - Sand or granular material <1/16""",1,0,0,92.4,StreamRiver
+MERRIL,660,1,F - Silt or fine powdery inorganic material,0.45,0.05,0.5,469,StreamRiver
+MOSQPD,17,0,M - Mud or decomposed organic material,0.3,0.1,0.6,12,LakePond
+MUDNO,42.5,1,M - Mud or decomposed organic material,1,0,0,30,LakePond
+MUDSO,88.6,3,M - Mud or decomposed organic material,0.9,0.1,0,62.3,LakePond
+OCSACO,49.4,0,M - Mud or decomposed organic material,1,0,0,34,StreamRiver
+OSSIPE,70,1,M - Mud or decomposed organic material,0.9,0.08,0.02,49.7,StreamRiver
+OSSIPM,63.8,0,M - Mud or decomposed organic material,0.5,0,0.5,45.3,StreamRiver
+OSSIPR,67.9,1,"S - Sand or granular material <1/16""",0.2,0.6,0.2,48.4,StreamRiver
+OTTER-01,65.2,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.1,0.6,0.3,46.1,LakePond
+OTTER-02,115.3,0,M - Mud or decomposed organic material,0.8,0.05,0.15,81.7,LakePond
+PANTHR-01,94.7,0,M - Mud or decomposed organic material,0.9,0.05,0.05,67.4,StreamRiver
+PANTHR-02,89.9,1,M - Mud or decomposed organic material,0.6,0.1,0.3,63.7,LakePond
+PANTHR-03,98.4,0,M - Mud or decomposed organic material,0.9,0.1,0,69.9,LakePond
+PISCAT,339,0,"S - Sand or granular material <1/16""",0.1,0.1,0.8,241,StreamRiver
+PISCDN,405,0,F - Silt or fine powdery inorganic material,1,0,0,288,StreamRiver
+PISCUP,290,1,F - Silt or fine powdery inorganic material,0.05,0.05,0.9,205,StreamRiver
+PRESBG,61.7,1,"S - Sand or granular material <1/16""",0.1,0,0.9,43.8,StreamRiver
+PRESUM-01,67.7,1,M - Mud or decomposed organic material,0.5,0.05,0.45,48.1,StreamRiver
+PRESUM-02,64.9,1,M - Mud or decomposed organic material,1,0,0,47.2,StreamRiver
+PROCPD-01,42.1,2,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,30.3,LakePond
+PROCPD-02,48.8,2,"S - Sand or granular material <1/16""",0.3,0,0.7,34.5,LakePond
+RACHEL,284,0,M - Mud or decomposed organic material,1,0,0,198,StreamRiver
+RANGE-01,95.8,1,M - Mud or decomposed organic material,0.9,0,0.1,68.2,LakePond
+RANGE-02,103.4,1,M - Mud or decomposed organic material,0.85,0.05,0.1,73.4,LakePond
+REDBRK,643,0,M - Mud or decomposed organic material,0.9,0,0.1,459,StreamRiver
+RIDGEB,212,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,149,StreamRiver
+ROYAL,264,0,"O - Cobble rocks 2.5-10""",0.6,0.39,0.01,187,StreamRiver
+SACONO-01,70.3,2,M - Mud or decomposed organic material,0.8,0,0.2,50.1,StreamRiver
+SACONO-02,16.3,2,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,36.6,StreamRiver
+SACONO-03,17.5,2,F - Silt or fine powdery inorganic material,0,0.75,0.25,12.5,LakePond
+SACOSO,61.1,2,"G - Gravel 0.6-2.5""",0.2,0.5,0.3,43.4,StreamRiver
+SEBAGO-01,60.5,0,M - Mud or decomposed organic material,0.6,0,0.4,42.9,LakePond
+SEBAGO-03,107.8,0,"P - Pea gravel 0.3-0.6""",0.4,0.6,0,76.5,LakePond
+SEBAGO-04,78.8,1,M - Mud or decomposed organic material,1,0,0,55.7,LakePond
+SEBAGO-06,146.8,1,F - Silt or fine powdery inorganic material,0,0,1,105,LakePond
+SFALLS,139.8,0,"S - Sand or granular material <1/16""",0,0,1,95,StreamRiver
+SHEPR,61.7,0,"S - Sand or granular material <1/16""",0.05,0,0.95,43.8,StreamRiver
+SOKOLK-01,96.3,2,"S - Sand or granular material <1/16""",0.2,0.3,0.5,68.3,LakePond
+SOKOLK-02,112.3,0,"O - Cobble rocks 2.5-10""",0.3,0,0.7,79.7,LakePond
+SOKOLK-03,102.4,0,M - Mud or decomposed organic material,0.2,0.2,0.6,73,LakePond
+SOPER,70.2,0,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,49.9,StreamRiver
+SPECPD,54.7,6,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.9,0.1,0,40.1,LakePond
+STANPD-01,61.5,2,"G - Gravel 0.6-2.5""",0.1,0.6,0.3,43.6,LakePond
+STANPD-02,74.8,4,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,53.1,LakePond
+STANPD-03,67.8,4,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,NA,LakePond
+SYMMES-01,63.5,2,M - Mud or decomposed organic material,1,0,0,45.1,LakePond
+SYMMES-02,62.7,2,M - Mud or decomposed organic material,0.9,0.09,0.01,44.7,LakePond
+TRAFPD-01,56.2,1,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",0.7,0,0.3,39.9,LakePond
+TRAFPD-02,56.2,1,"D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",1,0,0,NA,LakePond
+WATBRK,138,1,"G - Gravel 0.6-2.5""",0.9,0.09,0.01,98.1,StreamRiver

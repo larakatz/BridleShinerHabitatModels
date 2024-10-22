@@ -1,0 +1,977 @@
+---
+title: "Bridle Shiner CART analysis"
+author: "Lara Katz"
+date: "2024-04-29"
+output: pdf_document
+---
+*This code was written using R version 4.3.3.*
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+Load libraries:
+```{r message=FALSE}
+library(rpart)      # version 4.1.23
+library(tidyverse)  # version 2.0.0
+library(foreach)
+library(parallel)
+library(rattle)     # version 5.5.1
+library(rpart.plot) # version 3.1.2
+# library(terra) # version 1.7-71
+# library(tidyterra) # version 0.5.2
+```
+
+## About the analysis
+
+This code is building a classification and regression tree (CART) to determine which environmental variable(s) best distinguish between sites with Bridle Shiners and sites without Bridle Shiners. This is a nonparametric procedure that can be applied to datasets with mixed data types and missing values. The explanatory variables are a mix of categorical, binary, and continuous variables. CART is robust to outliers and collinearity, and does not require explanatory variables to have a multivariate normal distribution. Variables do not need to be transformed or z-standardized prior to the analysis, and variable selection to remove correlated variables does not need to be performed.
+
+# Data preparation
+
+Combine habitat variables into one csv:
+```{r}
+# # Aquatic plant presence-absence data
+# veg <- read.csv("./BDS_Plant_Surveys_updated.csv", header = T)
+# colnames(veg)[1] <- "Site"
+# veg <- veg %>% dplyr::filter(Site != "HALEY")
+# 
+# 
+# # Other habitat covariates (substrate, conductivity, elevation, etc.)
+# hab <- read.csv("./HabitatCovs.csv", header = T)
+# hab <- hab %>% dplyr::filter(Site != "HALEY") # eDNA sample lost in lab
+# hab[hab$dom.substrate == "C - Clay",]$dom.substrate <- "Clay"
+# hab[hab$dom.substrate == "P - Pea gravel 0.3-0.6\"",]$dom.substrate <- "Pea gravel" 
+# hab[hab$dom.substrate == "G - Gravel 0.6-2.5\"",]$dom.substrate <- "Gravel"   
+# hab[hab$dom.substrate == "O - Cobble rocks 2.5-10\"",]$dom.substrate <- "Cobble rocks"
+# hab[hab$dom.substrate == "D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc.",]$dom.substrate <- "Detritus"
+# hab[hab$dom.substrate == "S - Sand or granular material <1/16\"",]$dom.substrate <- "Sand"
+# hab[hab$dom.substrate == "M - Mud or decomposed organic material",]$dom.substrate <- "Mud"
+# hab[hab$dom.substrate == "F - Silt or fine powdery inorganic material",]$dom.substrate <- "Silt"
+# 
+# hab$dom.substrate <- as.factor(hab$dom.substrate)
+# hab$WBType <- as.factor(hab$WBType)
+# 
+# # Stream size/catchment position
+# catch <- read.csv("./catchment_position.csv", header = T)
+# catch <- catch %>% dplyr::filter(Site != "HALEY") # eDNA sample lost in lab
+# catch$catchment <- as.factor(catch$catchment)
+```
+
+Read in bridle shiner presence-absence data and make sure that every site has a value:
+```{r}
+# Bridle Shiner presence-absence data
+# occu <- read.csv("./Occupancy.csv", header = T)
+# occu <- occu %>% dplyr::filter(Site != "HALEY") # eDNA sample lost in lab
+# 
+# anyNA(occu$Occ) # this should be false
+```
+Read in plant cover data. These values are in percentages so they need to be converted to proportions:
+```{r}
+# Plant relative percent cover
+# cover1 <- read.csv("./ProportionPlantCover.csv", header = TRUE)
+# cover1 <- cover1 %>% dplyr::filter(Site.Name != "HALEY") # eDNA sample lost in lab
+# cover1 <- cover1[,-c(1,13)]
+# cover <-  as.data.frame(cbind(Site = cover1[,1], cover1[,2:11]/100))
+```
+
+Calculate elevation and canopy cover at each site:
+```{r}
+# points <- vect("./CurrentPointsUngrouped.shp")
+# coords1 <- as.data.frame(cbind(Site = points$SiteNam, 
+#                                geom(points)[,3:4]))
+# coords1$x <- as.numeric(coords1$x)
+# coords1$y <- as.numeric(coords1$y)
+# 
+# canopy <- rast("./NLCD_Canopy_2021.tif")
+# canopy <- crop(canopy,points)
+# cancov <- terra::extract(canopy, coords1[,2:3])
+# 
+# elev <- rast("./DEM_mosaic_10m.tif")
+# elevation <- terra::extract(elev, coords1[,2:3])
+# 
+# coords <- as.data.frame(cbind(coords1, canopy = cancov$NLCD_Canopy_2021, elevation = elevation$DEM_mosaic_10m))
+# 
+# coordsgrp <- coords %>% group_by(Site) %>% 
+#   summarise(x = mean(x), y = mean(y), 
+#             canopy = mean(canopy), 
+#             elevation = mean(elevation), 
+#             .groups = "drop") %>% filter(Site != "CANCO") # no habitat data collected here
+# coordsgrp
+# 
+# write.csv(coordsgrp, "./Canopy_Elevation.csv")
+```
+
+Read in elevation and canopy cover variables:
+```{r}
+# can.elev <- read.csv("./Canopy_Elevation.csv", header = TRUE, row.names = 1)
+# can.elev <- can.elev[,c(1,4,5)]
+```
+
+Combine all habitat and occupancy variables into a dataframe:
+```{r}
+# bds.all <- occu %>% left_join(., catch, by="Site") %>% 
+#   left_join(., hab, by="Site") %>% 
+#   left_join(., cover, by="Site") %>%   
+#   left_join(., can.elev, by="Site") %>% 
+#   left_join(., veg, by="Site")
+# 
+# write.csv(bds.all,"./BDS_Local_Covs.csv")
+```
+
+Import csv with Bridle Shiner (BDS) data:
+```{r}
+bds <- read.csv("./BDS_Local_Covs.csv", header = TRUE)
+bds <- bds %>% dplyr::select(-X)
+bds$dom.substrate <- as.factor(bds$dom.substrate)
+bds$catchment <- as.factor(bds$catchment)
+bds$WBType <- as.factor(bds$WBType)
+
+plantnames <- colnames(bds[,24:76])
+
+bds[plantnames] <- lapply(bds[plantnames], as.factor) # help from ChatGPT
+```
+
+```{r}
+# bds.cat.domsub <- bds %>% dplyr::select(-sub.complex, -sub.simple, -sub.grasslike,
+#                                  -emerg.persist, -emerg.cattail, -emerg.broad, 
+#                                  -prop.org.sub, -prop.large.sub, -prop.sm.sub, -catchment) # 2 right
+# data <- bds.cat.propsub <- bds %>% dplyr::select(-sub.complex, -sub.simple, -sub.grasslike,
+#                                  -emerg.persist, -emerg.cattail, -emerg.broad, 
+#                                  -dom.substrate, -catchment) # 3 right
+# bds.subcat.domsub <- bds %>% dplyr::select(-sub, -emerg, -prop.org.sub, 
+#                                           -prop.large.sub, -prop.sm.sub) # 1 right
+# bds.subcat.propsub <- bds %>% dplyr::select(-sub, -emerg, -dom.substrate, -catchment)
+```
+
+## About the data
+
+Each row of the dataset corresponds to one site surveyed for Bridle Shiners (*Notropis bifrenatus*) between 2021 and 2022. Sites were surveyed using environmental DNA (eDNA), and some sites were also surveyed via seine netting to validate eDNA results. There are 95 sites in total and habitat variables were measured at each site.
+
+### Habitat variables (columns 2-71)
+
+* **Occ**: Bridle Shiner presence (1) or absence (0) from the site (binary response variable)
+* **conductivity**: Conductivity at site measured in μS/cm (continuous data) 
+* **elevation**: Elevation (m) of the GPS point taken at the site, determined using a 10-m Digital Elevation Model in ArcGIS Pro (continuous data)
+* **dams**: The number of dams within a 2-km radius of the site that fall within the same watershed (count data, continuous) 
+* **dom.substrate**:  Dominant substrate at the site (categorical data). Categories: 
+  * L - Ledge, 
+  * B - Submerged boulders or rocks > 20" in diameter, 
+  * R - Rubble or rocks from 10-20", 
+  * O - Cobble rocks 2.5-10", 
+  * G - Gravel 0.6-2.5", 
+  * P - Pea gravel 0.3-0.6", 
+  * S - Sand or granular material < 1/16", 
+  * F - Silt or fine powdery inorganic material, 
+  * C - Clay, 
+  * M - Mud or decomposed organic material, 
+  * D - Detritus or large particles of organic material such as leaves, bark, sawdust, etc. 
+* **prop.org.sub**: Proportion of site dominated by organic substrates (proportion data, continous) 
+* **prop.large.sub**:  Proportion of site dominated by large substrates > 2mm in diameter (proportion data, continous) 
+* **prop.sm.sub**:  Proportion of site dominated by small substrates < 2mm in diameter (proportion data, continous) 
+* **prop.Sveg**:  Proportion of site dominated by submerged aquatic vegetation (proportion data, continous) 
+* **prop.Eveg**:  Proportion of site dominated by emergent aquatic vegetation (proportion data, continous) 
+* **prop.Fveg**:  Proportion of site dominated by floating aquatic vegetation (proportion data, continous) 
+* **prop.open.water**:  Proportion of site dominated by open water (no vegetation) (proportion data, continous) 
+* **prop.Sveg.complex**: Proportion of submerged vegetation category dominated by complex-leaved species (proportion data, continous)
+* **prop.Sveg.simple**: Proportion of submerged vegetation category dominated by simple-leaved species (proportion data, continuous)
+* **prop.Sveg.grass**: Proportion of submerged vegetation category dominated by mat-forming and/or grass-like species (proportion data, continuous)
+* **prop.Eveg1**: Proportion of emergent vegetation category dominated by persistent emergent species (proportion data, continuous)
+* **prop.Eveg.cat**: Proportion of emergent vegetation category dominated by *Typha* spp. (cat-tails) (proportion data, continuous)
+* **prop.Eveg.broad**: Proportion of emergent vegetation category dominated by broad-leaved deciduous species (proportion data, continuous)
+
+### Aquatic plant surveys
+
+Each site was surveyed for aquatic plants during eDNA and/or seine net surveys. Every aquatic plant species visible from the survey locations was recorded, and samples were collected and identified if the species was not known. Shrubs and emergent plants were only counted if they were partially submerged and available as cover. Each column below shows the presence or absence of each species or genus at a site.
+
+* **ALGAE**: Submerged algal mat
+* **ALNINC**: *Alnus incana* (speckled alder)
+* **BIDBEC**: *Bidens beckii* (Beck's water-marigold)
+* **BRASCH**: *Brasenia schreberi* (water-shield) 
+* **CALLSP**: *Callitriche* spp. (water-starworts)
+* **CARESP**: *Carex* spp. (sedges)
+* **CEPOCC**: *Cephalanthus occidentalis* (buttonbush)
+* **CERASP**: *Ceratophyllum* spp. (hornworts)
+* **DULARU**: *Dulichium arundinaceum* (three-way sedge)
+* **ELEACI**: *Eleocharis acicularis* (needle spikesedge)
+* **ELEROB**: *Eleocharis robbinsii* (Robbins' spikesedge)
+* **ELODSP**: *Elodea* spp. (waterweeds: *E. canadensis* or *E. nuttallii*)
+* **ERIOSP**: *Eriocaulon* spp. (pipeworts: *E. aquaticum* or *E. parkeri*)
+* **EQUISP**: *Equisetum* spp. (horsetails)
+* **GRAAUR**: *Gratiola aurea* (golden hedge-hyssop)
+* **GRASS**: Grass spp. (including *Leersia oryzoides*, *Glyceria* spp., and other emergent grasses)
+* **ISOESP**: *Isoetes* spp. (quillworts)
+* **JUNCSP**: *Juncus* spp. (rushes: *J. canadensis* or *J. effusus*)
+* **JUNMIL**: *Juncus militaris* (bayonet rush)
+* **ILEVER**: *Ilex verticillata* (winterberry)
+* **LEMNSP**: *Lemna* spp. (duckweeds)
+* **LUDPAL**: *Ludwigia palustris* (common water-primrose)
+* **LYSTER**: *Lysimachia terrestris* (swamp-candles)
+* **MOSS**: Aquatic moss spp.
+* **MYRTEN**: *Myriophyllum tenellum* (slender water-milfoil)
+* **MYRISP**: *Myriophyllum* spp. (water-milfoils, including invasive *M. heterophyllum*)
+* **NAJASP**: *Najas* spp. (waternymphs)
+* **NASOFF**: *Nasturtium officinale* (nasturtium)
+* **NUPVAR**: *Nuphar variegata* (bullhead pond-lily)
+* **NYMCOR**: *Nymphoides cordata* (little floating-heart)
+* **NYMODO**: *Nymphaea odorata* (white water-lily)
+* **PERSSP**: *Persicaria* spp. (smartweeds)
+* **PONCOR**: *Pontederia cordata* (pickerelweed)
+* **POTAMP**: *Potemogeton amplifolius* (big-leaved pondweed)
+* **POTEPI**: *Potamogeton epihydrus* (ribbon-leaved pondweed)
+* **POTGEM**: *Potamogeton gemmiparus* (budding pondweed)
+* **POTILL**: *Potamogeton illinoensis* (Illinois pondweed)
+* **POTNAT**: *Potamogeton natans* (floating pondweed)
+* **POTOAK**: *Potamogeton oakesianus* (Oakes' pondweed)
+* **POTPER**: *Potamogeton perfoliatus* (clasping-leaved pondweed)
+* **POTROB**: *Potamogeton robbinsii* (Robbins' pondweed)
+* **POTASP**: *Potamogeton* spp. (pondweeds)
+* **SAGFIL**: *Sagittaria filiformis* (narrow-leaved arrowhead)
+* **SAGLAT**: *Sagittaria latifolia* (common arrowhead)
+* **SCHSUB**: *Schoenoplectus subterminalis* (water annual-bulrush)
+* **SCICYP**: *Scirpus cyperinus* (common woolsedge)
+* **SPARSP**: *Sparganium* spp. (bur-reeds)
+* **TYPHSP**: *Typha* spp. (cat-tails: *T. angustifolia* or *T. latifolia*)
+* **UTRINT**: *Utricularia intermedia* (flat-leaved bladderwort)
+* **UTRISP**: *Utricularia* spp. (bladderworts: including *U. purpurea*)
+* **VACCSP**: *Vaccinium* spp. (cranberry)
+* **VALAME**: *Vallisneria americana* (tape-grass)
+* **ZANPAL**: *Zannichellia palustris* (horned-pondweed)
+
+# CART analysis
+
+## Set seeds
+
+Generate 10 random seeds:
+```{r}
+nmodel <- 1000
+set.seed(42)
+seeds.i <- sample.int(10000,1000)
+```
+
+## Specify model
+
+Specify the CART model:
+
+```{r}
+response_column <- names(bds)[2]
+predictor_columns <- names(bds)[c(-1,-2,-3)]
+
+model <- as.formula(paste(response_column, "~", paste(predictor_columns, collapse = "+")))
+```
+
+Assign model weights to categories:
+```{r}
+# modelWeights <- ifelse(bds[train,"Occ"] == 1, 1, 1)
+```
+
+## Compare models generated by different seeds and `minsplit` values
+
+### Prepare empty outputs
+Prepare empty outputs for the for-loop and create vectors of training and testing occupancy values to assess the model:
+```{r}
+# Create empty lists for the for-loop to store classification matrices
+train <- vector()
+train.list <- list()
+rpart <- list() # individual CART models
+cp <- vector() # threshold cp values for each model
+prune <- list() # individual pruned models
+testmat <- list() # classification matrices of the testing dataset run with the whole model
+prunemat <- list() # classification matrices of the testing dataset run with the pruned model
+
+# Create empty data frame to show accuracy results
+eval <- data.frame(matrix(NA, nrow=20, ncol=11)) # empty dataframe
+colnames(eval) <- c("Seed", "minsplit", "Train Accuracy", "Test Accuracy", "Prune Accuracy", "True Positives", "Sensitivity", "Specificity", "First splitting var", "Second splitting var", "Third splitting var") # name columns
+all.eval <- data.frame(matrix(NA, nrow=0, ncol=11)) # empty dataframe
+colnames(all.eval) <- c("Seed", "minsplit", "Train Accuracy", "Test Accuracy", "Prune Accuracy", "True Positives", "Sensitivity", "Specificity", "First splitting var", "Second splitting var", "Third splitting var") # name columns
+
+# Create list to store eval data frames from each seed
+output <- list()
+```
+
+### Run for-loop
+
+The `minsplit` parameter is the smallest number of observations (sites) included in a parent node that can be split further. The default `minsplit` value is 20, but the value may need to be adjusted for smaller datasets. Lower `minsplit` values can result in model overfitting. 
+
+Run the model with `minsplit` values between 1 and 20. Cross-validate 1000 times because results are variable when only cross-validating 10 times. Plot the cross-validation results to look at the estimated error rates:
+```{r}
+foreach (i = 1:nmodel, .packages = c("rpart", "tidyverse"), .verbose = TRUE, .combine = "rbind") %dopar% {
+# for (i in 1:nmodel){
+  # Assign approximately 2/3 of the sites to training data using a random seed:
+  set.seed(seeds.i[i])
+  train1 <- bds %>%
+         group_by(Occ) %>%
+         sample_frac(size=0.60) 
+  train <- which(bds$Site %in% train1$Site)
+  train.list[[i]] <- train
+  
+  # Create vectors of presence-absence values for the training and 
+  # testing data to compare with the model results:
+  occtrain <- unlist(as.vector(bds[train,"Occ"])) # training
+  occtest <- unlist(as.vector(bds[-train,"Occ"])) # testing
+  
+  # modelWeights <- ifelse(bds[train,"Occ"] == 1, 1, 1)
+  
+  for (j in 1:20){ # try minsplit values between 1 and 20
+  # Run model ----
+    rpart[[j]] <- rpart(model, 
+                        data = bds[train,], # training dataset for seed i
+                        # weights = modelWeights,
+                        method = "class", # classify data into categories (present/absent)
+                        control = rpart.control(minsplit = j, # min # of observations that must exist in a node in order for a split to be attempted
+                        xval = 1000)) # of cross-validations
+  # Plot cp plot (optional) ----
+    # plotcp(rpart[[j]], # model using minsplit value j
+    #        main = paste0(paste0(paste0("Seed = ",i),", minsplit = "), j)) # title each plot with its minsplit value
+    
+  # Plot full tree (optional) ----
+    # if (rpart[[j]]$cptable[1,"xerror"] == 0) { #help from ChatGPT
+    #   paste0(paste0(paste0("Fit is not a tree, just a root: seed = ",i),", minsplit = "), j)
+    #   } else {
+    #     post(rpart[[j]], file = "",
+    #          title = paste0(paste0(paste0("Full Tree: seed = ",i),", minsplit = "), j)) # plot tree
+    #     }
+    
+  # Determine optimal cp value ----
+    
+    # Populate the `cp` vector with NA for `minsplit` values that result in trees 
+    # with high prediction error (cross-validated error + cross-validated standard 
+    # error > the minimum error). Use the 1-SE rule to select the smallest tree 
+    # with an estimated error rate within one standard error of the minimum error 
+    # (De'ath and Fabricius 2000).
+    min_error_model <- which.min(rpart[[j]]$cptable[, "xerror"])
+    min_error <- rpart[[j]]$cptable[min_error_model, "xerror"]
+    se <- rpart[[j]]$cptable[min_error_model, "xstd"]
+    se_threshold <- min_error + se
+    
+    # For each minsplit value, populate the vector with its associated lowest cp value
+    if (se_threshold == 0) {
+      cp[j] <- NA
+      } else {
+        selected_models <- which((rpart[[j]]$cptable[, "xerror"] - 
+                                    rpart[[j]]$cptable[, "xstd"]) <= se_threshold)
+        selected_models <- selected_models[selected_models != 1] # nsplit = 0, just a node
+        
+        if (length(selected_models) == 0) {
+          cp[j] <- NA
+        } else {
+          cp[j] <- max(rpart[[j]]$cptable[selected_models,"CP"]) # highest CP = most parsimonious model
+        }
+      }
+
+  # Prune the trees using their associated `cp` value ----
+    if (!is.na(cp[j])) {
+      prune[[j]] <- prune(rpart[[j]], cp = cp[j])
+    } else {
+        print(paste0(paste0(paste0("Fit is not a tree, just a root: seed = ",i),", minsplit = "), j))
+    }
+  
+  # Assess model accuracy, sensitivity, and specificity ----
+    # Assess the accuracy of all the full and pruned models for each value of `minsplit`:
+    if (!is.na(cp[j])) {
+      # Classification matrix using the training dataset and the whole tree:
+      trainmat <- table(predict(rpart[[j]], bds[train,], type = "class"), occtrain)
+      # Classification matrix using the testing dataset and the whole tree: 
+      testmat[[j]] <- table(predict(rpart[[j]], bds[-train,], type = "class"), occtest)
+      # Classification matrix using the testing dataset and the pruned tree: 
+      prunemat[[j]] <- table(predict(prune[[j]], bds[-train,], type = "class"), occtest) 
+    
+      # Output dataframe
+      eval[j,1] <- i
+      eval[j,2] <- j
+      # Classification accuracy of the training dataset with the whole tree:
+      eval[j,3] <- sum(diag(prop.table(trainmat)))
+      # Classification accuracy of the testing dataset with the whole tree:
+      eval[j,4] <- sum(diag(prop.table(testmat[[j]]))) 
+      # Classification accuracy of the testing dataset with the pruned tree:
+      eval[j,5] <- sum(diag(prop.table(prunemat[[j]]))) 
+      # Number of correctly identified presences:
+      eval[j,6] <- prunemat[[j]][4] 
+      # Model sensitivity:
+      eval[j,7] <- prunemat[[j]][4] / (prunemat[[j]][4] + prunemat[[j]][3])
+      # Model specificity:
+      eval[j,8] <- prunemat[[j]][1] / (prunemat[[j]][1] + prunemat[[j]][2]) 
+    
+      # Get splitting variables:
+      vars <- prune[[j]]$frame[,1]
+      vars <- vars[vars != "<leaf>"]
+      
+      # First splitting variable:
+      eval[j,9] <- vars[1]
+      
+      # Second splitting variable:
+      if (length(vars) > 1) {
+        eval[j,10] <- vars[2] 
+      } else {
+        eval[j,10] <- NA
+      }
+        
+      # Third splitting variable:
+      if (length(vars) > 2) {
+        eval[j,11] <- vars[3] 
+      } else {
+        eval[j,11] <- NA
+      }
+    
+      ## Plot tree (optional) ----
+      # post(prune[[j]], file = "", 
+      #      title = paste0(paste0(paste0("Pruned Tree: seed = ",i),
+      #                            ", minsplit = "), j)) # plot tree
+      
+      } else {
+        eval[j,1] <- i
+        eval[j,2] <- j
+        eval[j,c(3:11)] <- NA
+        }
+    } # end of for-loop j
+  all.eval <- rbind(all.eval, eval) # save output dataframe for this seed
+  
+  write.csv(all.eval, "./evaluations.csv")
+  }
+```
+
+### Combine model results
+
+Combine evaluations for all seeds:
+```{r}
+all.eval <- read.csv("./evaluations.csv", row.names = 1, header = TRUE)
+
+# Sort by sensitivity to find the most sensitive model(s)
+total.models <- nrow(all.eval[!is.na(all.eval$Train.Accuracy),])
+all.eval <- all.eval[order(all.eval$Sensitivity, decreasing = TRUE),]
+
+all.eval.minsplit <- all.eval %>% 
+  filter(!is.na(Train.Accuracy)) %>% 
+  group_by(as.factor(minsplit)) %>% 
+  mutate(count = 1) %>% 
+  summarise(count = sum(count),
+            sensitivity = mean(Sensitivity), 
+            testacc = mean(Test.Accuracy), .groups = "drop") %>% 
+  arrange(-sensitivity)
+all.eval.1 <- all.eval %>% 
+  filter(!is.na(Train.Accuracy)) %>% 
+  group_by(First.splitting.var) %>% 
+  mutate(count = 1) %>% 
+  summarise(tally1 = sum(count), 
+            sensitivity = mean(Sensitivity), 
+            testacc = mean(Test.Accuracy), .groups = "drop") %>% 
+  arrange(-tally1) %>% 
+  mutate(proportion = tally1/total.models)
+
+# all.eval[all.eval$`First splitting var` == "dom.substrate" & !is.na(all.eval$`Second splitting var`) & all.eval$`Second splitting var` == "GRASS"  & !is.na(all.eval$`Third splitting var`) & all.eval$`Third splitting var` == "PONCOR",]
+# 
+# 
+# all.eval.50 <- all.eval %>% filter(!is.na(Sensitivity)) %>% filter(Sensitivity > 0.5) %>% arrange(-Prune.Accuracy)
+```
+
+## Evaluate top models
+
+Run the model with the optimal seed and `minsplit` value and look at the resulting tree:
+```{r }
+## Top model: highest sensitivity
+highest.sensitivity <- all.eval %>% filter(!is.na(Sensitivity)) %>% filter(Sensitivity == max(Sensitivity))
+highest.sensitivity.seeds <- unique(highest.sensitivity$Seed)
+highest.sensitivity.minsplit1 <- unique(highest.sensitivity[highest.sensitivity$Seed == highest.sensitivity.seeds[1],]$minsplit)
+highest.sensitivity.minsplit2 <- unique(highest.sensitivity[highest.sensitivity$Seed == highest.sensitivity.seeds[2],]$minsplit)
+
+seed.index <- highest.sensitivity.seeds[1]
+minsplit <- max(highest.sensitivity.minsplit1)
+
+# Assign approximately 2/3 of the sites to training data using a random seed:
+set.seed(seeds.i[seed.index])
+train1 <- bds %>%
+       group_by(Occ) %>%
+       sample_frac(size=0.60) 
+train <- which(bds$Site %in% train1$Site)
+  
+# Create vectors of presence-absence values for the training and 
+# testing data to compare with the model results:
+occtrain <- unlist(as.vector(bds[train,"Occ"])) # training
+occtest <- unlist(as.vector(bds[-train,"Occ"])) # testing
+predictions <- bds[,c("Site", "Occ")]
+
+rpartA <- rpart(model, 
+               data = bds[train,], # training dataset for seed i
+               # weights = modelWeights,
+               method = "class", # classify data into categories (present/absent)
+               control = rpart.control(minsplit = minsplit, # min # of observations that must exist in a node in order for a split to be attempted
+               xval = 1000)) # of cross-validations
+# plotcp(rpart, # model using minsplit value j
+#        main = paste0(paste0(paste0("Seed = ", seed), ", minsplit = "), minsplit)) # title each plot with its minsplit value
+  
+if (rpartA$cptable[1,"xerror"] == 0) { #help from ChatGPT
+  print("Fit is not a tree, just a root")
+  } else {
+    post(rpartA, file = "", 
+         title = "Full Tree") # plot tree
+    }
+  
+# Populate the `cp` vector with NA for `minsplit` values that result in trees 
+# with high prediction error (cross-validated error + cross-validated standard 
+# error > the minimum error). Use the 1-SE rule to select the smallest tree 
+# with an estimated error rate within one standard error of the minimum error 
+# (De'ath and Fabricius 2000).
+
+min_error_model <- which.min(rpartA$cptable[, "xerror"])
+min_error <- rpartA$cptable[min_error_model, "xerror"]
+se <- rpartA$cptable[min_error_model, "xstd"]
+se_threshold <- min_error + se
+
+# Populate the vector with its associated lowest cp value
+if (se_threshold == 0) {
+  cp <- NA
+  
+  } else {
+    selected_models <- which((rpartA$cptable[, "xerror"] - 
+                                rpartA$cptable[, "xstd"]) <= se_threshold)
+    selected_models <- selected_models[selected_models != 1] # nsplit = 0, just a node
+    
+    if (length(selected_models) == 0) {
+      cp <- NA
+    } else {
+      cp <- max(rpartA$cptable[selected_models,"CP"]) # highest CP = most parsimonious model
+    }
+    
+  }
+
+# Prune the trees using their associated `cp` value:
+if (!is.na(cp)) {
+  pruneA <- prune(rpartA, cp = cp)
+} else {
+    print("Fit is not a tree, just a root")
+  }
+
+# Classification matrix using combined training/testing datasets:
+alldat <- unlist(as.vector(bds[,"Occ"]))
+allmat <- table(predict(pruneA, bds, type = "class"), alldat)
+predictions <- cbind(predictions, Model.A = predict(pruneA, bds, type = "class"))
+predictions[predictions$Occ == 1 & predictions$Model.A == 0,]$Site
+# Output dataframe
+eval.sens1 <- data.frame(matrix(NA, nrow=0, ncol=6)) # empty dataframe
+colnames(eval.sens1) <- c("Seed", "minsplit", "Accuracy", "True.Positives",
+                    "Sensitivity", "Specificity") # name columns
+# Seed used to create model:
+eval.sens1[1,1] <- highest.sensitivity.seeds[1]
+# Minsplit used to create model:
+eval.sens1[1,2] <- max(highest.sensitivity.minsplit1)
+# Classification accuracy of the testing dataset with the pruned tree:
+eval.sens1[1,3] <- sum(diag(prop.table(allmat)))
+# Number of correctly identified presences:
+eval.sens1[1,4] <- allmat[4]
+# Model sensitivity:
+eval.sens1[1,5] <- allmat[4] / (allmat[4] + allmat[3])
+# Model specificity:
+eval.sens1[1,6] <- allmat[1] / (allmat[1] + allmat[2])
+
+#   # Get splitting variables:
+#   vars <- prune$frame[,1]
+#   vars <- vars[vars != "<leaf>"]
+#   
+#   # First splitting variable:
+#   eval[1,6] <- vars[1]
+#   
+#   # Second splitting variable:
+#   if (length(vars) > 1) {
+#     eval[1,7] <- vars[2] 
+#   } else {
+#     eval[1,7] <- NA
+#   }
+#   
+#   # Third splitting variable:
+#   if (length(vars) > 2) {
+#     eval[1,8] <- vars[3] 
+#   } else {
+#     eval[1,8] <- NA
+#   }
+  tiff(filename = "./HighestSensitivity-ModelA.tif", width = 2880, height = 2880, res = 900)
+  # Plot tree
+  # post(pruneA, filename = "", title. = "", pretty = TRUE) # plot tree
+  fancyRpartPlot(pruneA, caption = NULL, type = 2)
+  dev.off()
+
+# } else {
+#   eval[1,c(1:8)] <- NA
+#   }
+# eval
+# sum(diag(prop.table(allmat))) 
+# allmat[4] / (allmat[4] + allmat[3])
+
+```
+
+Top model: highest sensitivity 2
+```{r}
+## Top model: highest sensitivity
+highest.sensitivity <- all.eval %>% filter(!is.na(Sensitivity)) %>% filter(Sensitivity == max(Sensitivity))
+highest.sensitivity.seeds <- unique(highest.sensitivity$Seed)
+highest.sensitivity.minsplit1 <- unique(highest.sensitivity[highest.sensitivity$Seed == highest.sensitivity.seeds[1],]$minsplit)
+highest.sensitivity.minsplit2 <- unique(highest.sensitivity[highest.sensitivity$Seed == highest.sensitivity.seeds[2],]$minsplit)
+
+seed.index <- highest.sensitivity.seeds[2]
+minsplit <- max(highest.sensitivity.minsplit2)
+
+# Assign approximately 2/3 of the sites to training data using a random seed:
+set.seed(seeds.i[seed.index])
+train1 <- bds %>%
+       group_by(Occ) %>%
+       sample_frac(size=0.60) 
+train <- which(bds$Site %in% train1$Site)
+  
+# Create vectors of presence-absence values for the training and 
+# testing data to compare with the model results:
+occtrain <- unlist(as.vector(bds[train,"Occ"])) # training
+occtest <- unlist(as.vector(bds[-train,"Occ"])) # testing
+
+
+rpartB <- rpart(model, 
+               data = bds[train,], # training dataset for seed i
+               # weights = modelWeights,
+               method = "class", # classify data into categories (present/absent)
+               control = rpart.control(minsplit = minsplit, # min # of observations that must exist in a node in order for a split to be attempted
+               xval = 1000)) # of cross-validations
+# plotcp(rpart, # model using minsplit value j
+#        main = paste0(paste0(paste0("Seed = ", seed), ", minsplit = "), minsplit)) # title each plot with its minsplit value
+  
+if (rpartB$cptable[1,"xerror"] == 0) { #help from ChatGPT
+  print("Fit is not a tree, just a root")
+  } else {
+    post(rpartB, file = "", 
+         title = "Full Tree") # plot tree
+    }
+  
+# Populate the `cp` vector with NA for `minsplit` values that result in trees 
+# with high prediction error (cross-validated error + cross-validated standard 
+# error > the minimum error). Use the 1-SE rule to select the smallest tree 
+# with an estimated error rate within one standard error of the minimum error 
+# (De'ath and Fabricius 2000).
+
+min_error_model <- which.min(rpartB$cptable[, "xerror"])
+min_error <- rpartB$cptable[min_error_model, "xerror"]
+se <- rpartB$cptable[min_error_model, "xstd"]
+se_threshold <- min_error + se
+
+# Populate the vector with its associated lowest cp value
+if (se_threshold == 0) {
+  cp <- NA
+  
+  } else {
+    selected_models <- which((rpartB$cptable[, "xerror"] - 
+                                rpartB$cptable[, "xstd"]) <= se_threshold)
+    selected_models <- selected_models[selected_models != 1] # nsplit = 0, just a node
+    
+    if (length(selected_models) == 0) {
+      cp <- NA
+    } else {
+      cp <- max(rpartB$cptable[selected_models,"CP"]) # highest CP = most parsimonious model
+    }
+    
+  }
+# Prune the trees using their associated `cp` value:
+if (!is.na(cp)) {
+  pruneB <- prune(rpartB, cp = cp)
+} else {
+    print("Fit is not a tree, just a root")
+}
+
+# Classification matrix using combined training/testing datasets:
+alldat <- unlist(as.vector(bds[,"Occ"]))
+allmat <- table(predict(pruneB, bds, type = "class"), alldat)
+predictions <- cbind(predictions, Model.B = predict(pruneB, bds, type = "class"))
+
+# Output dataframe
+eval.sens2 <- data.frame(matrix(NA, nrow=0, ncol=6)) # empty dataframe
+colnames(eval.sens2) <- c("Seed", "minsplit", "Accuracy", "True.Positives",
+                    "Sensitivity", "Specificity") # name columns
+# Seed used to create model:
+eval.sens2[1,1] <- highest.sensitivity.seeds[2]
+# Minsplit used to create model:
+eval.sens2[1,2] <- max(highest.sensitivity.minsplit2)
+# Classification accuracy of the testing dataset with the pruned tree:
+eval.sens2[1,3] <- sum(diag(prop.table(allmat)))
+# Number of correctly identified presences:
+eval.sens2[1,4] <- allmat[4]
+# Model sensitivity:
+eval.sens2[1,5] <- allmat[4] / (allmat[4] + allmat[3])
+# Model specificity:
+eval.sens2[1,6] <- allmat[1] / (allmat[1] + allmat[2])
+
+tiff(filename = "./HighestSensitivity-ModelB.tif", width = 12000, height = 6800, res = 2400)
+# Plot tree
+# post(pruneB, filename = "", title. = "", pretty = TRUE) # plot tree
+fancyRpartPlot(pruneB, caption = NULL, type = 2)
+dev.off()
+```
+
+Top model: accuracy 1
+```{r}
+## Top model: highest test dataset accuracy
+highest.acc <- all.eval %>% filter(!is.na(Prune.Accuracy)) %>% filter(Prune.Accuracy == max(Prune.Accuracy))
+highest.acc.seeds <- unique(highest.acc$Seed)
+highest.acc.minsplit1 <- unique(highest.acc[highest.acc$Seed == highest.acc.seeds[1],]$minsplit)
+highest.acc.minsplit2 <- unique(highest.acc[highest.acc$Seed == highest.acc.seeds[2],]$minsplit)
+
+seed.index <- highest.acc.seeds[1]
+minsplit <- max(highest.acc.minsplit1)
+
+# Assign approximately 2/3 of the sites to training data using a random seed:
+set.seed(seeds.i[seed.index])
+train1 <- bds %>%
+       group_by(Occ) %>%
+       sample_frac(size=0.60) 
+train <- which(bds$Site %in% train1$Site)
+  
+# Create vectors of presence-absence values for the training and 
+# testing data to compare with the model results:
+occtrain <- unlist(as.vector(bds[train,"Occ"])) # training
+occtest <- unlist(as.vector(bds[-train,"Occ"])) # testing
+
+
+rpartC <- rpart(model, 
+               data = bds[train,], # training dataset for seed i
+               # weights = modelWeights,
+               method = "class", # classify data into categories (present/absent)
+               control = rpart.control(minsplit = minsplit, # min # of observations that must exist in a node in order for a split to be attempted
+               xval = 1000)) # of cross-validations
+# plotcp(rpart, # model using minsplit value j
+#        main = paste0(paste0(paste0("Seed = ", seed), ", minsplit = "), minsplit)) # title each plot with its minsplit value
+  
+if (rpartC$cptable[1,"xerror"] == 0) { #help from ChatGPT
+  print("Fit is not a tree, just a root")
+  } else {
+    post(rpartC, file = "", 
+         title = "Full Tree") # plot tree
+    }
+  
+# Populate the `cp` vector with NA for `minsplit` values that result in trees 
+# with high prediction error (cross-validated error + cross-validated standard 
+# error > the minimum error). Use the 1-SE rule to select the smallest tree 
+# with an estimated error rate within one standard error of the minimum error 
+# (De'ath and Fabricius 2000).
+
+min_error_model <- which.min(rpartC$cptable[, "xerror"])
+min_error <- rpartC$cptable[min_error_model, "xerror"]
+se <- rpartC$cptable[min_error_model, "xstd"]
+se_threshold <- min_error + se
+
+# Populate the vector with its associated lowest cp value
+if (se_threshold == 0) {
+  cp <- NA
+  
+  } else {
+    selected_models <- which((rpartC$cptable[, "xerror"] - 
+                                rpartC$cptable[, "xstd"]) <= se_threshold)
+    selected_models <- selected_models[selected_models != 1] # nsplit = 0, just a node
+    
+    if (length(selected_models) == 0) {
+      cp <- NA
+    } else {
+      cp <- max(rpartC$cptable[selected_models,"CP"]) # highest CP = most parsimonious model
+    }
+    
+  }
+# Prune the trees using their associated `cp` value:
+if (!is.na(cp)) {
+  pruneC <- prune(rpartC, cp = cp)
+} else {
+    print("Fit is not a tree, just a root")
+}
+
+# Classification matrix using combined training/testing datasets:
+alldat <- unlist(as.vector(bds[,"Occ"]))
+allmat <- table(predict(pruneC, bds, type = "class"), alldat)
+predictions <- cbind(predictions, Model.C = predict(pruneC, bds, type = "class"))
+
+# Output dataframe
+eval.acc1 <- data.frame(matrix(NA, nrow=0, ncol=6)) # empty dataframe
+colnames(eval.acc1) <- c("Seed", "minsplit", "Accuracy", "True.Positives",
+                    "Sensitivity", "Specificity") # name columns
+# Seed used to create model:
+eval.acc1[1,1] <- highest.acc.seeds[1]
+# Minsplit used to create model:
+eval.acc1[1,2] <- max(highest.acc.minsplit1)
+# Classification accuracy of the testing dataset with the pruned tree:
+eval.acc1[1,3] <- sum(diag(prop.table(allmat)))
+# Number of correctly identified presences:
+eval.acc1[1,4] <- allmat[4]
+# Model sensitivity:
+eval.acc1[1,5] <- allmat[4] / (allmat[4] + allmat[3])
+# Model specificity:
+eval.acc1[1,6] <- allmat[1] / (allmat[1] + allmat[2])
+
+tiff(filename = "./HighestPruneAccuracy-ModelC.tif", width = 3200, height = 3500, res = 940)
+# Plot tree
+fancyRpartPlot(pruneC, caption = NULL, type = 2)
+# post(pruneC, filename = "", title. = "", pretty = TRUE) # plot tree
+dev.off()
+```
+
+Highest accuracy 2
+```{r}
+## Top model: highest test dataset accuracy
+highest.acc <- all.eval %>% filter(!is.na(Prune.Accuracy)) %>% filter(Prune.Accuracy == max(Prune.Accuracy))
+highest.acc.seeds <- unique(highest.acc$Seed)
+highest.acc.minsplit1 <- unique(highest.acc[highest.acc$Seed == highest.acc.seeds[1],]$minsplit)
+highest.acc.minsplit2 <- unique(highest.acc[highest.acc$Seed == highest.acc.seeds[2],]$minsplit)
+
+seed.index <- highest.acc.seeds[2]
+minsplit <- max(highest.acc.minsplit2)
+
+# Assign approximately 2/3 of the sites to training data using a random seed:
+set.seed(seeds.i[seed.index])
+train1 <- bds %>%
+       group_by(Occ) %>%
+       sample_frac(size=0.60) 
+train <- which(bds$Site %in% train1$Site)
+  
+# Create vectors of presence-absence values for the training and 
+# testing data to compare with the model results:
+occtrain <- unlist(as.vector(bds[train,"Occ"])) # training
+occtest <- unlist(as.vector(bds[-train,"Occ"])) # testing
+
+
+rpartD <- rpart(model, 
+               data = bds[train,], # training dataset for seed i
+               # weights = modelWeights,
+               method = "class", # classify data into categories (present/absent)
+               control = rpart.control(minsplit = minsplit, # min # of observations that must exist in a node in order for a split to be attempted
+               xval = 1000)) # of cross-validations
+# plotcp(rpart, # model using minsplit value j
+#        main = paste0(paste0(paste0("Seed = ", seed), ", minsplit = "), minsplit)) # title each plot with its minsplit value
+  
+if (rpartD$cptable[1,"xerror"] == 0) { #help from ChatGPT
+  print("Fit is not a tree, just a root")
+  } else {
+    post(rpartD, file = "", 
+         title = "Full Tree") # plot tree
+    }
+  
+# Populate the `cp` vector with NA for `minsplit` values that result in trees 
+# with high prediction error (cross-validated error + cross-validated standard 
+# error > the minimum error). Use the 1-SE rule to select the smallest tree 
+# with an estimated error rate within one standard error of the minimum error 
+# (De'ath and Fabricius 2000).
+
+min_error_model <- which.min(rpartD$cptable[, "xerror"])
+min_error <- rpartD$cptable[min_error_model, "xerror"]
+se <- rpartD$cptable[min_error_model, "xstd"]
+se_threshold <- min_error + se
+
+# Populate the vector with its associated lowest cp value
+if (se_threshold == 0) {
+  cp <- NA
+  
+  } else {
+    selected_models <- which((rpartD$cptable[, "xerror"] - 
+                                rpartD$cptable[, "xstd"]) <= se_threshold)
+    selected_models <- selected_models[selected_models != 1] # nsplit = 0, just a node
+    
+    if (length(selected_models) == 0) {
+      cp <- NA
+    } else {
+      cp <- max(rpartD$cptable[selected_models,"CP"]) # highest CP = most parsimonious model
+    }
+    
+  }
+# Prune the trees using their associated `cp` value:
+if (!is.na(cp)) {
+  pruneD <- prune(rpartD, cp = cp)
+} else {
+    print("Fit is not a tree, just a root")
+}
+
+# Classification matrix using combined training/testing datasets:
+alldat <- unlist(as.vector(bds[,"Occ"]))
+allmat <- table(predict(pruneD, bds, type = "class"), alldat)
+predictions <- cbind(predictions, Model.D = predict(pruneD, bds, type = "class"))
+predictions[,2:6] <- lapply(predictions[,2:6], as.factor)
+
+predictions$correct <- NA
+for (i in 1:nrow(predictions)){
+  if (predictions[i,"Occ"] == 0) {
+  predictions[i,"correct"] <- rowSums(predictions[,3:6] == 0)[i]
+  }
+  if (predictions[i,"Occ"] == 1) {
+    predictions[i,"correct"] <- rowSums(predictions[,3:6] == 1)[i]
+  }
+}
+
+predictions$correct <- predictions$correct/4
+
+write.csv(predictions, "./top_model_predict.csv", row.names = FALSE)
+nrow(predictions[predictions$Occ == 1 & predictions$correct == 1,])
+
+
+# Output dataframe
+eval.acc2 <- data.frame(matrix(NA, nrow=0, ncol=6)) # empty dataframe
+colnames(eval.acc2) <- c("Seed", "minsplit", "Accuracy", "True.Positives",
+                    "Sensitivity", "Specificity") # name columns
+# Seed used to create model:
+eval.acc2[1,1] <- highest.acc.seeds[2]
+# Minsplit used to create model:
+eval.acc2[1,2] <- max(highest.acc.minsplit2)
+# Classification accuracy of the testing dataset with the pruned tree:
+eval.acc2[1,3] <- sum(diag(prop.table(allmat)))
+# Number of correctly identified presences:
+eval.acc2[1,4] <- allmat[4]
+# Model sensitivity:
+eval.acc2[1,5] <- allmat[4] / (allmat[4] + allmat[3])
+# Model specificity:
+eval.acc2[1,6] <- allmat[1] / (allmat[1] + allmat[2])
+
+tiff(filename = "./HighestPruneAccuracy-ModelD.tif", width = 2880, height = 2880, res = 1000)
+# Plot tree
+# post(pruneD, filename = "", title. = "", pretty = TRUE) # plot tree
+fancyRpartPlot(pruneD, caption = NULL, type = 2)
+dev.off()
+```
+
+```{r}
+colnames <- colnames(highest.acc)
+
+top.models.acc <- highest.acc %>% group_by(Seed) %>% summarise(minsplit = max(minsplit), .groups = "drop") %>% left_join(., highest.acc, by = c("Seed", "minsplit"))
+
+top.models.sens <- highest.sensitivity %>% group_by(Seed) %>% summarise(minsplit = max(minsplit), .groups = "drop") %>% left_join(., highest.sensitivity, by = c("Seed", "minsplit"))
+
+top.models <- rbind(top.models.acc, top.models.sens)
+
+full.dataset.eval <- rbind(eval.sens1, eval.sens2, eval.acc1, eval.acc2) %>% dplyr::select(-True.Positives)
+rownames(full.dataset.eval) <- c("A","B","C","D")
+
+# full.dataset.eval <- full.dataset.eval %>% arrange(-Accuracy)
+
+
+
+sumA <- summary(pruneA, file = "./ModelAsummarystats.csv")
+sumB <- summary(pruneB, file = "./ModelBsummarystats.csv")
+sumC <- summary(pruneC, file = "./ModelCsummarystats.csv")
+sumD <- summary(pruneD, file = "./ModelDsummarystats.csv")
+
+sumA$variable.importance
+sumB$variable.importance
+sumC$variable.importance
+sumD$variable.importance
+
+
+top.model.test.eval <- 
+  all.eval %>% 
+  filter((Seed == 284 & minsplit == 16) | 
+           (Seed == 613 & minsplit == 19) | 
+           (Seed == 138 & minsplit == 5) | 
+           (Seed == 929 & minsplit == 5)) %>% 
+  left_join(., full.dataset.eval, by = c("Seed", "minsplit")) %>% 
+  dplyr::select(-True.Positives) %>% 
+  dplyr::rename(Sensitivity.prune = Sensitivity.x, 
+                Specificity.prune = Specificity.x, 
+                Sensitivity.full = Sensitivity.y, 
+                Specificity.full = Specificity.y)
+rownames(top.model.test.eval) <- c("A","B","C","D")
+
+write.csv(top.model.test.eval, "./full_dataset_evals.csv")
+```
+
+
+# References
+
+De’ath, G., and Fabricius, K.E. 2000. Classification and regression trees: A powerful yet simple technique for ecological data analysis. Ecology 81(11): 3178–3192. doi:10.1890/0012-9658(2000)081[3178:CARTAP]2.0.CO;2.
+
+Hallyburton, S., and Stark, W. 2023. Increasing detection sensitivity for rare and endangered species in Kansas through development of an aquatice environmental DNA sampling protocol. Transactions of the Kansas Academy of Science 126(1–2): 102–114. doi:10.1660/062.126.0115.

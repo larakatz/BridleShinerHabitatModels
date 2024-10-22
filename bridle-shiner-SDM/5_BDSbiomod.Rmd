@@ -1,0 +1,2954 @@
+---
+title: "Bridle Shiner Species Distribution Models"
+author: "Lara Katz"
+date: "2024-06-17"
+output: word_document
+---
+
+```{r message=FALSE}
+library(biomod2) # version 4.2-5
+library(corrplot)
+library(sf) # version 1.0-16
+library(tidyverse) # version 2.0.0
+library(stats)
+library(reshape) # for melt
+# install.packages("ggtext")
+library(ggtext) # for plotting biomod2 
+library(randomForest) # version 4.7-1.1
+library(reshape2)
+# install.packages("gam")
+# library(gam)
+library(parallel)
+library(pROC)
+library(reshape2)
+library(matrixStats) # version 1.3.0
+library(modeest)
+library(terra)
+library(tidyterra)
+library(viridis)
+```
+
+Load functions:
+```{r}
+source("./5_BDSbiomod_functions.R") # functions prep_env and biomod_loop
+```
+
+
+```{r}
+# n.cores <- 4
+crs19N <- 26919 # NAD83 / UTM Zone 19N
+# sp_to_model <- "BDS"
+```
+
+Generate 1000 random seeds:
+```{r}
+set.seed(42)
+seeds <- sample.int(10000, 1000, replace = FALSE)
+seeds[1:10]
+seeds[990:1000]
+```
+
+Tutorial: https://biomodhub.github.io/biomod2/articles/examples_1_mainFunctions.html
+
+# Current period (2009-2022)
+
+## Fine scale
+
+Prepare inputs:
+```{r}
+prepped_env <- prep_env(shp = "./biomod/input_points_S_pa_curr.shp", 
+                        period = "Current", 
+                        hucsize = "small")
+
+n.pab.c <- prepped_env[["n.pab"]] 
+cS.points.all <- prepped_env[["points.all1"]]
+```
+
+Set model hyperparameters:
+```{r}
+cS_user_val <- model.params(n.cores = 1)
+```
+
+Define for-loop outputs:
+```{r}
+trialname <- "cS"
+cS_EM <- list()
+```
+
+```{r}
+points = cS.points.all
+period = "Current"
+hucsize = "small"
+crs = crs19N
+n.pab = n.pab.c
+nb.cpu = 1
+var.import = 3 
+user.val = cS_user_val
+select.thresh = 0.5
+
+
+biomod_loop <- function(points, period, hucsize, crs, n.pab, nb.cpu, var.import, 
+                        user.val, select.thresh) { 
+  # Format input data-----------------------------------------------------------
+  
+  ## Clear last round of outputs and create new empty dataframes:
+  points$pab <- NA
+  if (period == "Current") {
+    points[!is.na(points$cOccu) & points$cOccu == 1,]$pab <- 1
+    ncases <- nrow(points[!is.na(points$cOccu) & points$cOccu == 1,])
+  } # end assign 1 to current presence points
+  if (period == "Historical") {
+    points[!is.na(points$hOccu) & points$hOccu == 1,]$pab <- 1
+    ncases <- nrow(points[!is.na(points$hOccu) & points$hOccu == 1,])
+  } # end assign 1 to historic presence points
+  
+  ## Create empty dataframes to hold outputs:
+  new_evals <- as.data.frame(matrix(NA, nrow=3, ncol=7))
+  colnames(new_evals) <- c("looprun", "seed","model","meanROC","maxROC", "meanTSS", "maxTSS")
+  
+  EM.list <- list() # list of ensemble models
+  
+  new_em_scores <- as.data.frame(matrix(NA, nrow = 0, ncol = 16))
+  colnames(new_em_scores) <- c("looprun", "seed", "full.name", "merged.by.PA", 
+                               "merged.by.run", "merged.by.algo", "filtered.by", 
+                               "algo", "metric.eval", "cutoff", "sensitivity", 
+                               "specificity", "calibration", "validation", 
+                               "evaluation", "nmodels")
+  
+  var.imp.new <- as.data.frame(matrix(NA, nrow = 0, ncol=5))
+  colnames(var.imp.new) <- c("algo", "expl.var", "looprun", "seed", "mean.var.imp")
+  
+  new_em_evals <- as.data.frame(matrix(NA, nrow = 1, ncol = 7))
+  colnames(new_em_evals) <- c("looprun", "Seed","AUC","TSS","sensitivity",
+                              "specificity","threshold")
+  
+  ## Assign new set of pseudoabsences-------------------------------------------
+  set.seed(seeds[i])
+  unknown <- points[is.na(points$pab),]
+  pab.hucs <- sample(points$huc, n.pab, replace=FALSE)
+  pab.index <- which(points$huc %in% pab.hucs)  
+  points[pab.index,]$pab <- 0
+  
+  ## Create indices for combined training (calibration) and validation data-----
+  set.seed(seeds[i])
+  calval1 <- points %>%
+    filter(!is.na(pab)) %>%  # Known presences and absences
+    group_by(pab) %>%
+    dplyr::sample_frac(size=0.80) # 60% calibration, 20% validation, will be separated by biomod
+  calval <- which(points$huc %in% calval1$huc)
+  
+  ## Create indices for testing (evaluation) data:
+  eval1 <- points[-calval,] %>% 
+    filter(!is.na(pab))
+  eval <- which(points$huc %in% eval1$huc)
+  
+  ## Create index of HUCs with unknown occupancy:
+  new1 <- points %>% 
+    filter(is.na(pab)) # Locations to predict occupancy
+  new <- which(points$huc %in% new1$huc)
+  
+  ## Create dataframes of response variables----------------------------------
+  ## Known presence/absence to be split into calibration/validation:
+  occ.calval1 <- points[calval,] %>% dplyr::select(huc, pab, X, Y)
+  cS.points.all[cS.points.all$huc == "huc2119",]$X
+  occ.calval1[which(is.na(occ.calval1$X)),]$huc
+  rownames(occ.calval1) <- occ.calval1$huc
+  occ.calval <- occ.calval1 %>% dplyr::select(-huc) %>%
+    st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs))
+  resp.calval <- occ.calval %>% dplyr::select(pab) %>% st_drop_geometry(.) %>%
+    as.matrix(.) %>% as.numeric(.)
+  index.calval <- cbind(huc=row.names(occ.calval), ID=1:length(resp.calval))
+  
+  ## Known presence/absence to be used as evaluation (testing):
+  occ.eval1 <- points[eval,] %>% dplyr::select(huc, pab, X, Y)
+  rownames(occ.eval1) <- occ.eval1$huc
+  occ.eval <- occ.eval1 %>% dplyr::select(-huc) %>% 
+    st_as_sf(., coords=c("X","Y"), remove=TRUE, crs=st_crs(crs))
+  resp.eval <- occ.eval %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+    as.matrix(.) %>% as.numeric(.)
+  index.eval <- cbind(huc=row.names(occ.eval), ID=1:length(resp.eval))
+  
+  ## New points at which to predict occupancy:
+  occ.new1 <- points[new,] %>% dplyr::select(huc, pab, X, Y)
+  rownames(occ.new1) <- occ.new1$huc
+  occ.new <- occ.new1 %>% dplyr::select(-huc) %>% 
+    st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs))
+  resp.new <- occ.new %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+    as.matrix(.) %>% as.numeric(.)
+  index.new <- cbind(huc=row.names(occ.new), ID=1:length(resp.new))
+  
+  ## Create data.frames of coordinates----------------------------------------
+  coords.calval <- as.data.frame(st_coordinates(occ.calval))
+  coords.eval <- as.data.frame(st_coordinates(occ.eval))
+  coords.new <- as.data.frame(st_coordinates(occ.new))
+  
+  ## Create data.frames of explanatory variables------------------------------
+  if (period == "Current"){
+    env.calval <- points[calval,] %>% dplyr::select(-huc,-cOccu,-pab,-X,-Y) %>%
+      as.data.frame(.)
+    env.eval <- points[eval,] %>% dplyr::select(-huc,-cOccu,-pab,-X,-Y) %>% 
+      as.data.frame(.)
+    env.new <- points[new,] %>% dplyr::select(-huc,-cOccu,-pab,-X,-Y) %>% 
+      as.data.frame(.)
+  } # end current points creation loop
+  if (period == "Historical"){
+    env.calval <- points[calval,] %>% dplyr::select(-huc,-hOccu,-pab,-X,-Y) %>%
+      as.data.frame(.)
+    env.eval <- points[eval,] %>% dplyr::select(-huc,-hOccu,-pab,-X,-Y) %>% 
+      as.data.frame(.)
+    env.new <- points[new,] %>% dplyr::select(-huc,-hOccu,-pab,-X,-Y) %>% 
+      as.data.frame(.)
+  } # end historical points creation loop
+  
+  ## Create formatted data objects--------------------------------------------
+  ## Calibration/validation data:
+  format <- 
+    BIOMOD_FormatingData(
+      resp.name = paste0("BDS.", seeds[i]),
+      resp.var = resp.calval, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+      expl.var = env.calval, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+      dir.name = "./biomod", # modeling folder
+      resp.xy = coords.calval,
+      PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+      PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+      PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+      na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+  
+  ## Evaluation data:
+  format_eval <- 
+    BIOMOD_FormatingData(
+      resp.name = paste0("BDS.", seeds[i]),
+      resp.var = resp.eval, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+      expl.var = env.eval, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+      dir.name = "./biomod", # modeling folder
+      resp.xy = coords.eval,
+      PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+      PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+      PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+      na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+  
+  # Define calibration/validation data across cross-validation runs-----------
+  cv.table <- bm_CrossValidation(bm.format = format,
+                                 strategy = "random",
+                                 nb.rep = 10, perc = 0.75)
+  
+  # Create ModelingOptions object---------------------------------------------
+  model_opt <- 
+    bm_ModelingOptions(
+      data.type = 'binary', 
+      models = c('CTA', # Classification Tree Analysis
+                 'GBM', # Boosted Regression Trees (Gradient Boosting Machines)
+                 'RF' # Random Forest
+                 # 'GLM', # Generalized Linear Model
+                 # 'GAM', # Generalized Additive Model
+      ),
+      strategy = 'user.defined',
+      user.val = user.val,
+      user.base = "bigboss", # base parameters to be modified by user.val
+      bm.format = format,
+      calib.lines = cv.table)
+  
+  # Run individual models-----------------------------------------------------
+  ind_models <- 
+    BIOMOD_Modeling(
+      bm.format = format, # call in correctly formatted data
+      models = c(
+        "CTA", 
+        # "GAM", 
+        "GBM", 
+        # "GLM", 
+        "RF"), 
+      OPT.user = model_opt, # call options that you specified earlier
+      CV.strategy = "user.defined", # randomly split data between calibration and validation
+      CV.do.full.models = FALSE, # keep calibration and validation data separate
+      CV.user.table = cv.table,
+      OPT.strategy = "user.defined",
+      OPT.user.val = user.val,
+      var.import = var.import, # An integer corresponding to the number of permutations to be done for each variable to estimate variable importance
+      metric.eval = c("TSS", "ROC"),
+      nb.cpu = nb.cpu,
+      seed.val = seeds[i]
+    )
+  
+  ## Evaluate individual models using validation dataset------------------------
+  roc_by_model <- 
+    ind_models %>% 
+    get_evaluations(.) %>% 
+    filter(metric.eval == "ROC") %>% 
+    group_by(algo) %>% 
+    summarise(mean_ROC = mean(validation), max_ROC = max(validation))
+  tss_by_model <- 
+    ind_models %>% 
+    get_evaluations(.) %>% 
+    filter(metric.eval == "TSS") %>% 
+    group_by(algo) %>% 
+    summarise(mean_TSS = mean(validation), max_TSS = max(validation))
+  over_thresh <- 
+    ind_models %>% 
+    get_evaluations(.) %>% 
+    filter(metric.eval == "TSS") %>% 
+    filter(validation > select.thresh) %>% 
+    summarise(total = nrow(.))
+  # roc_by_model 
+  # tss_by_model
+  
+  new_evals[1:length(unique(roc_by_model$algo)),1] <- i
+  new_evals[1:length(unique(roc_by_model$algo)),2] <- seeds[i]
+  new_evals[,3] <- roc_by_model$algo
+  new_evals[,4] <- roc_by_model$mean_ROC
+  new_evals[,5] <- roc_by_model$max_ROC
+  new_evals[,6] <- tss_by_model$mean_TSS
+  new_evals[,7] <- tss_by_model$max_TSS
+
+  # Ensemble models-----------------------------------------------------------
+  if (exists("over_thresh")) {
+    if (over_thresh$total > 1) { # more than one individual model retained
+      ## Create ensemble model:
+      EM.list <- # Save in EM list in slot for seed i
+        BIOMOD_EnsembleModeling(
+          bm.mod = ind_models,
+          models.chosen = 'all',
+          em.by = 'all',
+          em.algo = c('EMwmean','EMca'),
+          metric.select = 'TSS',
+          metric.select.thresh = select.thresh, # Good: TSS > 0.6, ROC/AUC > 0.7
+          metric.eval = c('TSS', 'ROC'),
+          var.import = var.import,
+          EMci.alpha = 0.05,
+          EMwmean.decay = 'proportional',
+          nb.cpu = nb.cpu,
+          seed.val = seeds[i]
+        )
+      new_em_scores <- cbind(looprun = i, 
+                             seed = seeds[i],
+                             get_evaluations(EM.list), 
+                             nmodels = over_thresh$total) # evaluate model
+      
+      ## Variable permutation importance:
+      var.imp.new <- 
+        get_variables_importance(EM.list) %>% 
+        group_by(algo, expl.var) %>% 
+        summarise(looprun = i, seed = seeds[i], mean.var.imp = mean(var.imp), .groups="drop")
+    } else {
+      if (over_thresh$total == 0) { # if no individual models are selected
+        print(paste("All models for seed", seeds[i], "below threshold TSS value of", select.thresh, ". No ensemble model created.", sep = " "))
+        new_em_scores <- c(i, seeds[i], rep(NA, (ncol(new_em_scores))-1), 0) # add NAs to df of ensemble model scores
+        var.imp.new <- c(NA, NA, i, seeds[i], NA)
+      } # end ensemble model loop (no ensemble model created, 0 models)
+      
+      if (over_thresh$total == 1) { # if 1 individual model is selected
+        print(paste("Only one model for seed", seeds[i], "below threshold TSS value of", select.thresh, ". No ensemble model created.", sep = " "))
+        new_em_scores <- c(i, seeds[i], rep(NA, (ncol(new_em_scores))-1), 1) # add NAs to df of ensemble model scores
+        var.imp.new <- c(NA, NA, i, seeds[i], NA)
+      } # end ensemble model loop (no ensemble model created, 1 model)
+    } # end create ensemble model loop (over_thresh already exists)
+  } else { # R keeps skipping over the over_thresh step for some reason
+    over_thresh <- # calculate over_thresh
+      ind_models %>% 
+      get_evaluations(.) %>% 
+      filter(metric.eval == "TSS") %>% 
+      filter(validation > select.thresh) %>% # models over TSS threshold
+      summarise(total = nrow(.)) # how many models?
+    if (over_thresh$total > 1) { # more than one individual model retained
+      ## Create ensemble model:
+      EM.list <- # Save in EM list in slot for seed i
+        BIOMOD_EnsembleModeling(
+          bm.mod = ind_models,
+          models.chosen = 'all',
+          em.by = 'all',
+          em.algo = c('EMwmean','EMca'),
+          metric.select = 'TSS',
+          metric.select.thresh = select.thresh, # Good: TSS > 0.6, ROC/AUC > 0.7
+          metric.eval = c('TSS', 'ROC'),
+          var.import = var.import,
+          EMci.alpha = 0.05,
+          EMwmean.decay = 'proportional',
+          nb.cpu = nb.cpu,
+          seed.val = seeds[i])
+      
+      new_em_scores <- cbind(looprun = i, 
+                             seed = seeds[i], 
+                             get_evaluations(EM.list), 
+                             nmodels = over_thresh$total) # evaluate model
+      
+      ## Variable permutation importance:
+      var.imp.new <- 
+        get_variables_importance(EM.list) %>% 
+        group_by(algo, expl.var) %>% 
+        summarise(looprun = i, seed = seeds[i], mean.var.imp = mean(var.imp), .groups="drop")
+    } else {# end ensemble model creation loop
+      if (over_thresh$total == 0) { # if no individual models are selected
+        print(paste("All models for seed", seeds[i], "below threshold TSS value of", select.thresh, "no ensemble model created.", sep = " "))
+        new_em_scores <- c(i, seeds[i], rep(NA, (ncol(new_em_scores))-1), 0) # add NAs to df of ensemble model scores
+        var.imp.new <- c(NA, NA, i, seeds[i], NA)
+      } # end ensemble model loop (no ensemble model created, 0 models)
+      if (over_thresh$total == 1) { # if 1 individual model is selected
+        print(paste("Only one model for seed", seeds[i], "below threshold TSS value of", select.thresh, "no ensemble model created.", sep = " "))
+        new_em_scores <- c(i, seeds[i], rep(NA, (ncol(new_em_scores))-1), 1) # add NAs to df of ensemble model scores
+        var.imp.new <- c(NA, NA, i, seeds[i], NA)
+      } 
+    } # end ensemble model loop (no ensemble model created, 1 model)
+  } # end create ensemble model loop (over_thresh did not exist)
+  
+  ## Evaluate ensemble models using evaluation dataset--------------------------
+  ## Evaluation folder:
+  if (period == "Current") {
+    if (hucsize == "huc12") {
+      proj.name <- "cL_EM_forecast"
+    }
+    if (hucsize == "small") {
+      proj.name <- "cS_EM_forecast"
+    }
+  }
+  if (period == "Historical") {
+    if (hucsize == "huc12") {
+      proj.name <- "hL_EM_forecast"
+    }
+    if (hucsize == "small") {
+      proj.name <- "hS_EM_forecast"
+    }
+  }
+  
+  ## Evaluate models based on whether they are ensemble or individual models:
+  if(exists("over_thresh")) { # do we know how many individual models were retained?
+    if (over_thresh$total > 1) { # if an ensemble model was created above
+      EM_forecast <- # predict presence across combined calibration + validation data
+        BIOMOD_EnsembleForecasting(
+          bm.em = EM.list,
+          proj.name = proj.name, # folder based on which input data is used
+          new.env = format_eval@data.env.var,
+          new.env.xy = format_eval@coord,
+          models.chosen = 'all',
+          metric.binary = 'TSS',
+          nb.cpu = nb.cpu) 
+      
+      predict <- get_predictions(EM_forecast) # get predictions from forecast
+      predicted <- # create vector of predictions
+        predict %>% 
+        filter(filtered.by == "TSS") %>% 
+        filter(algo == "EMwmean") %>% 
+        dplyr::select(pred) %>% 
+        unlist(.) %>% 
+        unname(.)
+      
+      true_occu <- format_eval@data.species # vector of actual occupancy data
+      
+      ## Check ROC/AUC and TSS (help from ChatGPT):
+      roc_curve <- roc(response=true_occu, predicted) # create ROC/AUC curve
+      # plot(roc_curve)
+      roc_coords <- 
+        pROC::coords(
+          # find threshold value(s) of TSS (max(sensitivities+specificities))
+          roc=roc_curve, 
+          x="best") # Several thresholds might be equally optimal.
+           
+      if (nrow(roc_coords) > 1) { # if there are multiple ROC thresholds
+        tss_value.j <- c()
+        for (j in 1:length(roc_coords$threshold)) { # find the one that maximizes TSS
+          # tss_threshold <- roc_coords$threshold[j] %>% as.numeric(.)
+          tss_value.j[j] <- roc_coords$specificity[j] + roc_coords$sensitivity[j] - 1
+        }
+        tss.value.j <- as.data.frame(cbind(value = tss_value.j, index = 1:length(tss_value.j)))
+        tss.j <- tss.value.j[which(tss.value.j$value == max(tss.value.j$value)),]$index
+        tss_threshold <- roc_coords$threshold[tss.j] %>% as.numeric(.)
+        tss_value <- roc_coords$specificity[tss.j] + roc_coords$sensitivity[tss.j] - 1
+        
+        new_em_evals[,1] <- i
+        new_em_evals[,2] <- seeds[i]
+        new_em_evals[,3] <- auc(roc_curve)[tss.j] %>% as.numeric(.)
+        new_em_evals[,4] <- tss_value
+        new_em_evals[,5] <- roc_coords$sensitivity[tss.j]
+        new_em_evals[,6] <- roc_coords$specificity[tss.j]
+        new_em_evals[,7] <- tss_threshold
+      }
+      
+      if (nrow(roc_coords) == 1) { # if there is 1 threshold
+        if (!is.na(roc_coords$threshold)) {
+          tss_threshold <- roc_coords$threshold %>% as.numeric(.)
+          tss_value <- roc_coords$specificity + roc_coords$sensitivity - 1
+          
+          new_em_evals[,1] <- i
+          new_em_evals[,2] <- seeds[i]
+          new_em_evals[,3] <- auc(roc_curve) %>% as.numeric(.)
+          new_em_evals[,4] <- tss_value
+          new_em_evals[,5] <- roc_coords$sensitivity
+          new_em_evals[,6] <- roc_coords$specificity
+          new_em_evals[,7] <- tss_threshold
+        }
+        if (is.na(roc_coords$threshold)) { # if there is no best threshold value
+          new_em_evals[,1] <- i
+          new_em_evals[,2] <- seeds[i] # don't use this model
+          new_em_evals[,3] <- NA
+          new_em_evals[,4] <- NA
+          new_em_evals[,5] <- NA
+          new_em_evals[,6] <- NA
+          new_em_evals[,7] <- NA
+        }
+      } # end loop for if an ensemble model with 1 threshold value
+    } # end loop for if an ensemble model was created above
+    if (over_thresh$total <= 1) { # if only 1 or zero individual models were retained
+      new_em_evals[,1] <- i # no ensemble model to evaluate
+      new_em_evals[,2] <- seeds[i] 
+      new_em_evals[,3] <- NA
+      new_em_evals[,4] <- NA
+      new_em_evals[,5] <- NA
+      new_em_evals[,6] <- NA
+      new_em_evals[,7] <- NA
+    } # end loop for if no ensemble model was created
+  } else { # if over_thresh doesn't exist (even though it should)
+    over_thresh <- 
+      ind_models %>% 
+      get_evaluations(.) %>% 
+      filter(metric.eval == "TSS") %>% 
+      filter(validation > select.thresh) %>% 
+      summarise(total = nrow(.))
+    
+    if (over_thresh$total > 1) { # if an ensemble model was created above
+      EM_forecast <- # predict presence across combined calibration + validation data
+        BIOMOD_EnsembleForecasting(
+          bm.em = EM.list,
+          proj.name = proj.name, # folder based on which input data is used
+          new.env = format_eval@data.env.var,
+          new.env.xy = format_eval@coord,
+          models.chosen = 'all',
+          metric.binary = 'TSS',
+          nb.cpu = nb.cpu) 
+      
+      predict <- get_predictions(EM_forecast) # get predictions from forecast
+      predicted <- # create vector of predictions
+        predict %>% 
+        filter(filtered.by == "TSS") %>% 
+        filter(algo == "EMwmean") %>% 
+        dplyr::select(pred) %>% 
+        unlist(.) %>% 
+        unname(.)
+      
+      true_occu <- format_eval@data.species # vector of actual occupancy data
+      prev <- ncases / (ncases + n.pab) # the prevalence of positives, or the proportion of positive cases in the population (ncases / (ncontrols + ncases))
+      
+      ## Check ROC/AUC and TSS (help from ChatGPT):
+      roc_curve <- roc(response=true_occu, predicted) # create ROC/AUC curve
+      # plot(roc_curve)
+      roc_coords <- 
+        pROC::coords(
+          roc=roc_curve, 
+          x="best" # Several thresholds might be equally optimal.
+          # best.weights=c(cost, prev) # cost of a false negative is higher than that of a false positive 
+        )  
+      roc_coords <- rbind(roc_coords, c(394, 0.625, 1))
+      if (nrow(roc_coords) > 1) { # if there are multiple ROC thresholds
+        tss_value.j <- c()
+        for (j in 1:length(roc_coords$threshold)) { # find the one that maximizes TSS
+          tss_value.j[j] <- roc_coords$specificity[j] + roc_coords$sensitivity[j] - 1
+        }
+        tss.value.j <- as.data.frame(cbind(value = tss_value.j, index = 1:length(tss_value.j)))
+        tss.j <- tss.value.j[which(tss.value.j$value == max(tss.value.j$value)),]$index
+        tss_threshold <- roc_coords$threshold[tss.j] %>% as.numeric(.)
+        tss_value <- roc_coords$specificity[tss.j] + roc_coords$sensitivity[tss.j] - 1
+        
+        for (k in 1:length(tss.j)) { # if there is still more than one best threshold
+          new_em_evals[k,1] <- i
+          new_em_evals[k,2] <- seeds[i]
+          new_em_evals[k,3] <- auc(roc_curve) %>% as.numeric(.)
+          new_em_evals[k,4] <- tss_value[k]
+          new_em_evals[k,5] <- roc_coords$sensitivity[k]
+          new_em_evals[k,6] <- roc_coords$specificity[k]
+          new_em_evals[k,7] <- tss_threshold[k]
+        }
+      }
+      if (nrow(roc_coords) == 1) { # if there is 1 threshold
+        if (!is.na(roc_coords$threshold)) {
+          tss_threshold <- roc_coords$threshold %>% as.numeric(.)
+          # TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+          # TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+          tss_value <- roc_coords$specificity + roc_coords$sensitivity - 1
+          
+          new_em_evals[,1] <- i
+          new_em_evals[,2] <- seeds[i]
+          new_em_evals[,3] <- auc(roc_curve) %>% as.numeric(.)
+          new_em_evals[,4] <- tss_value
+          new_em_evals[,5] <- roc_coords$sensitivity
+          new_em_evals[,6] <- roc_coords$specificity
+          new_em_evals[,7] <- tss_threshold
+        }
+        if (is.na(roc_coords$threshold)) { # if there is no best threshold value
+          new_em_evals[,1] <- i 
+          new_em_evals[,2] <- seeds[i] # don't use this model
+          new_em_evals[,3] <- NA
+          new_em_evals[,4] <- NA
+          new_em_evals[,5] <- NA
+          new_em_evals[,6] <- NA
+          new_em_evals[,7] <- NA
+        }
+      } # end loop for if an ensemble model with 1 threshold value
+    }  # end loop for if over_thresh did not exist but is > 1
+    if (over_thresh$total <= 1) { # if only 1 or zero individual models were retained
+      new_em_evals[,1] <- i # no ensemble model to evaluate
+      new_em_evals[,2] <- seeds[i] 
+      new_em_evals[,3] <- NA
+      new_em_evals[,4] <- NA
+      new_em_evals[,5] <- NA
+      new_em_evals[,6] <- NA
+      new_em_evals[,7] <- NA
+    } # end loop for if no ensemble model was created
+  } # end loop for if over_thresh needed to be recalculated
+  
+  # ensemble_evals <- rbind(ensemble_evals, new_em_evals)
+  # } # end of for loop
+  em_outputs <- list(new_evals, new_em_scores, EM.list, new_em_evals, var.imp.new)
+  names(em_outputs) <- c("new_evals", "new_em_scores", "EM.list", "new_em_evals", "var.imp.new")
+  return(em_outputs)
+} # end of function
+```
+
+If computer shuts down and model needs to be restarted:
+```{r}
+cS_ind_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-individual.csv"),
+                         check.names = FALSE)
+cS_EM_scores <- read.csv(paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"),
+                         check.names = FALSE)
+cS_ensemble_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"),
+                              check.names=FALSE)
+cS_var_imp <- read.csv(paste0("./biomod/", trialname, "_MasterVariableImportance.csv"),
+                       check.names=FALSE)
+cS_EM <- readRDS(paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+max(cS_ensemble_evals$looprun) # restart from next seed number
+```
+
+Generate 1000 ensemble models from the 30000 individual models:
+```{r eval=FALSE}
+for (looprun in 1:length(seeds)) {
+  if (looprun == 1) {
+    start <- Sys.time()
+  }
+  
+  if (looprun > 1) {
+    ## Clear last round of outputs:
+    keep.objects <- 
+      c("biomod_loop", "model.params", "prep_env", # functions
+        "crs", "crs19N", "n.cores", "nb.cpu", "n.pab", "n.pab.c", "seeds", # inputs
+        "trialname", "points", "cS.points.all", "user.val", "cS_user_val", # inputs
+        "prepped_env", "period", "hucsize", "var.import", "select.thresh", # inputs
+        "cS_EM_scores", "cS_ensemble_evals", "cS_ind_evals", # master outputs
+        "cS_EM", "cS_var_imp", "i", "looprun" # master outputs
+      )
+    rm(list = setdiff(ls(), keep.objects)) # remove all intermediate data
+  }
+  
+  ## Create and evaluate ensemble model with seed i:
+  cS_new_outputs <- 
+    biomod_loop(
+      i = looprun,
+      points = cS.points.all, 
+      period = "Current", 
+      hucsize = "small",
+      crs = crs19N,
+      n.pab = n.pab.c, # number of pseudoabsences
+      nb.cpu = 1,
+      var.import = 10,
+      user.val = cS_user_val, 
+      select.thresh = 0.5 # threshold TSS score 
+      ) 
+ 
+  ## Add new outputs to lists and dataframes of all outputs:
+  if (looprun == 1) {
+    cS_ind_evals <- cS_new_outputs[["new_evals"]]
+    cS_EM_scores <- cS_new_outputs[["new_em_scores"]]
+    cS_ensemble_evals <- cS_new_outputs[["new_em_evals"]]
+    cS_var_imp <- cS_new_outputs[["var.imp.new"]]
+    if (length(cS_new_outputs[["EM.list"]]) >= 1) {
+      cS_EM[[looprun]] <- cS_new_outputs[["EM.list"]] 
+    }
+    
+  } else {
+    cS_ind_evals <- rbind(cS_ind_evals, cS_new_outputs[["new_evals"]])
+    cS_EM_scores <- rbind(cS_EM_scores, cS_new_outputs[["new_em_scores"]])
+    cS_ensemble_evals <- rbind(cS_ensemble_evals, cS_new_outputs[["new_em_evals"]])
+    cS_var_imp <- rbind(cS_var_imp, cS_new_outputs[["var.imp.new"]])
+    if (length(cS_new_outputs[["EM.list"]]) >= 1) {
+      cS_EM[[looprun]] <- cS_new_outputs[["EM.list"]]
+    }
+  }
+  
+  ## Save outputs:
+  write.csv(cS_ind_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-individual.csv"), 
+            row.names = FALSE)
+  write.csv(cS_EM_scores, 
+            paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"), 
+            row.names = FALSE)
+  write.csv(cS_ensemble_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"), 
+            row.names = FALSE)
+  write.csv(cS_var_imp, 
+            paste0("./biomod/", trialname, "_MasterVariableImportance.csv"), 
+            row.names = FALSE)
+  saveRDS(cS_EM, paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+  
+  if (looprun == 1000) {
+    end <- Sys.time()
+  }
+}
+end - start
+```
+
+Format data for final model:
+```{r}
+## Add column for presence-only data:
+cS.points.all$pab <- NA
+cS.points.all[!is.na(cS.points.all$cOccu) & cS.points.all$cOccu == 1,]$pab <- 1 # assign 1 to historic presence points
+ 
+## New points at which to predict occupancy:
+cS.occ.all1 <- cS.points.all %>% dplyr::select(huc, pab, X, Y)
+rownames(cS.occ.all1) <- cS.occ.all1$huc
+cS.occ.all <- cS.occ.all1 %>% dplyr::select(-huc) %>% 
+  st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs19N))
+cS.resp.all <- cS.occ.all %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+  as.matrix(.) %>% as.numeric(.)
+cS.index.all <- cbind(huc=row.names(cS.occ.all), ID=1:length(cS.resp.all)) %>% as.data.frame(.)
+cS.index.all$ID <- as.numeric(cS.index.all$ID)
+
+## Create data.frames of coordinates:
+cS.coords.all <- as.data.frame(st_coordinates(cS.occ.all))
+
+## Create data.frames of explanatory variables:
+cS.env.all <- cS.points.all %>% dplyr::select(-huc,-cOccu,-pab,-X,-Y) %>%
+  as.data.frame(.)
+
+## Format for biomod:
+cS_format_all <- BIOMOD_FormatingData(resp.name = paste0("BDS.", trialname),
+                                  resp.var = cS.resp.all, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+                                  expl.var = cS.env.all, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+                                  dir.name = "./biomod", # modeling folder
+                                  resp.xy = cS.coords.all,
+                                  PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+                                  PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+                                  PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+                                  na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+
+cS_true_occu <- cS_format_all@data.species # vector of actual occupancy data
+```
+
+Create output dataframe of predictions for each seed:
+```{r}
+cS_predict_all1 <- as.data.frame(matrix(NA, nrow=nrow(cS.points.all), ncol = (length(seeds)+1)))
+colnames(cS_predict_all1)[1] <- "true_occu"
+cS_predict_all1[,1] <- cS_true_occu
+
+for (looprun in 1:length(seeds)) {
+  if (length(cS_EM[[looprun]]) == 1) {
+    EM_forecast <- # predict presence across combined calibration + validation data
+        BIOMOD_EnsembleForecasting(
+          bm.em = cS_EM[[looprun]],
+          proj.name = paste0("BDS.", trialname), # folder based on which input data is used
+          new.env = cS_format_all@data.env.var,
+          new.env.xy = cS_format_all@coord,
+          models.chosen = 'all',
+          metric.binary = 'TSS',
+          nb.cpu = nb.cpu) 
+      
+  predict <- get_predictions(EM_forecast) # get predictions from forecast
+  new.predict <- # create vector of predictions
+    predict %>% 
+    filter(filtered.by == "TSS") %>% 
+    filter(algo == "EMwmean") %>% 
+    dplyr::select(pred) %>% 
+    unlist(.) %>% 
+    unname(.)
+  } 
+  if (length(cS_EM[[looprun]]) == 0) {
+    new.predict <- rep(NA, nrow(cS.points.all))
+    
+  }
+  cS_predict_all1[,(looprun+1)] <- new.predict
+}
+```
+
+Simulating predictions:
+```{r}
+# cS_predict_all1 <- as.data.frame(matrix(NA, nrow=nrow(cS.points.all), ncol = (length(seeds)+1)))
+# cS_predict_all1[,1] <- sample(c(1, 0, NA), nrow(cS.points.all), replace = TRUE)
+# colnames(cS_predict_all1)[1] <- "true_occu"
+# 
+# for (i in 1:length(seeds)) {
+#   cS_predict_all1[,(i+1)] <- ceiling(runif(nrow(cS.points.all), min = 1, max = 999))
+# }
+# cS_predict_all1$V300 <- NA
+# 
+# cS_ensemble_evals <- as.data.frame(matrix(NA, nrow=length(seeds), ncol = 0))
+# cS_ensemble_evals$TSS <- runif(1000, min = 0.2, max = 0.8)
+# cS_ensemble_evals$TSS[300] <- NA
+# cS_ensemble_evals$threshold <- rpois(1000, 500)
+# cS_ensemble_evals$threshold[300] <- NA
+# 
+# cS_predict_all <- as.matrix(cS_predict_all1)
+# weight.vec1 <- as.numeric(cS_ensemble_evals[!is.na(cS_ensemble_evals$TSS),]$TSS)
+# weight.vec <- weight.vec1 / sum(weight.vec1)
+# 
+# cols.to.keep <- which(!is.na(colMeans(cS_predict_all)))
+# mean.pred <- 
+#   matrixStats::rowWeightedMeans(
+#     cS_predict_all[,cols.to.keep], 
+#     na.rm = TRUE, 
+#     w = weight.vec)
+# cS_predict_all <- cS_predict_all %>% as.data.frame(.) %>% mutate(mean_pred = mean.pred)
+# head(cS_predict_all$mean_pred)
+```
+
+Find the weighted mean prediction at each point: 
+```{r}
+cS_predict_all1 <- read.csv("./biomod/cS_predict_all_intermediate.csv", header = TRUE, row.names = 1)
+colnames(cS_predict_all1)[2:1001] <- c(1:1000)
+cS_predict_all <- as.matrix(cS_predict_all1)
+
+## Find models with more than 1 threshold value:
+mult.thresh <- modeest::mfv(cS_ensemble_evals[which(!is.na(cS_ensemble_evals$threshold) & cS_ensemble_evals$threshold != -Inf & cS_ensemble_evals$threshold != Inf),]$looprun)
+
+num.thresh <- c()
+for (i in 1:length(mult.thresh)) {
+  num.thresh[i] <- nrow(cS_ensemble_evals[cS_ensemble_evals$looprun == mult.thresh[i],])
+}
+cS_ensemble_evals[which(cS_ensemble_evals$looprun %in% mult.thresh),]$TSS # each pair will have the same TSS
+
+mods.to.keep.cS <- 
+  cS_ensemble_evals[which(
+    !is.na(cS_ensemble_evals$threshold) & 
+    cS_ensemble_evals$threshold != -Inf & 
+    cS_ensemble_evals$threshold != Inf),] %>% 
+  group_by(looprun) %>% 
+  summarise(TSS = mean(TSS), .groups = "drop")
+weight.vec1 <- mods.to.keep$TSS
+weight.vec.cS <- weight.vec1 / sum(weight.vec1)
+saveRDS(weight.vec.cS, "./biomod/cS_weight_vector.RDS")
+
+
+col.index.cS <- which(colnames(cS_predict_all) %in% mods.to.keep.cS$looprun)
+
+mean.pred <- 
+  matrixStats::rowWeightedMeans(
+    cS_predict_all[,col.index.cS], 
+    na.rm = FALSE, 
+    w = weight.vec)
+
+cS_predict_all <- cS_predict_all %>% as.data.frame(.) %>% mutate(mean_pred = mean.pred)
+head(cS_predict_all$mean_pred)
+cS_predict_all$ID <- rownames(cS_predict_all)
+cS_predict_all$ID <- as.numeric(cS_predict_all$ID)
+cS_predict_all <- cS_predict_all %>% left_join(., as.data.frame(cS.index.all), by="ID")
+
+## Save outputs:
+write.csv(cS_predict_all, "./biomod/cS_final_predictions2.csv")
+```
+
+Find the mean threshold value across all models:
+```{r}
+## Load outputs:
+cS_predict_all <- read.csv("./biomod/cS_final_predictions2.csv", header = TRUE, row.names = 1)
+
+cS_predict_huc <- cS_predict_all %>% 
+  dplyr::rename(looprun = ID) %>%  
+  dplyr::select(looprun, mean_pred, huc)
+
+cS_thresholds_all <- cS_predict_huc %>% 
+  right_join(., cS_ensemble_evals, by = "looprun") %>% 
+  filter(!is.na(threshold)) %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  dplyr::select(looprun, TSS, threshold)
+
+modeest::mfv(cS_thresholds_all$looprun) == mult.thresh # should be TRUE
+
+weight.vec1 <- cS_thresholds_all$TSS
+weight.vec <- weight.vec1 / sum(weight.vec1)
+
+cS_threshold <- 
+  stats::weighted.mean(
+    cS_thresholds_all$threshold, 
+    w = weight.vec, na.rm = FALSE)
+saveRDS(cS_threshold, "./biomod/cS_weightedmeanthresh.RDS")
+# cS.points.pred <- 
+#   cS.points.all %>% 
+#   left_join(., cS_predict_huc, by="huc") %>% 
+#   mutate(pred_occu = ifelse(mean.pred > cS_threshold_all, 1, 0)) %>% 
+#   st_as_sf(., coords=c("X","Y"), remove=TRUE, crs=st_crs(crs19N))
+# 
+# plot(cS.points.pred["mean.pred"])
+# plot(cS.points.pred["pred_occu"])
+```
+
+Make a shapefile of predictions at each HUC:
+```{r}
+cS.poly <- 
+  st_read("./biomod/input_small_hucs_poly.shp") %>% 
+  dplyr::select(huc) %>%
+  left_join(., cS_predict_huc, by = "huc") %>%
+  mutate(pred_occu = ifelse(mean_pred > cS_threshold, 1, 0))
+
+plot(cS.poly["mean_pred"])
+plot(cS.poly["pred_occu"])
+
+st_write(cS.poly, "./biomod/cS_final_prediction.shp", append = FALSE) # save shapefile
+```
+
+## Coarse scale
+
+Prepare inputs:
+```{r}
+prepped_env <- prep_env(shp = "./biomod/input_points_L_pa_curr.shp", 
+                        period = "Current", 
+                        hucsize = "huc12")
+
+n.pab.c <- prepped_env[["n.pab"]] 
+cL.points.all <- prepped_env[["points.all1"]]
+```
+
+Set model hyperparameters:
+```{r}
+cL_user_val <- model.params(n.cores = 1)
+```
+
+Define for-loop outputs:
+```{r}
+trialname <- "cL"
+cL_EM <- list()
+```
+
+If computer shuts down and model needs to be restarted:
+```{r}
+cL_ind_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-individual.csv"),
+                         check.names = FALSE)
+cL_EM_scores <- read.csv(paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"),
+                         check.names = FALSE)
+cL_ensemble_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"),
+                              check.names=FALSE)
+cL_var_imp <- read.csv(paste0("./biomod/", trialname, "_MasterVariableImportance.csv"),
+                       check.names=FALSE)
+cL_EM <- readRDS(paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+max(cL_ensemble_evals$looprun) # restart from next seed number
+```
+
+Generate 1000 ensemble models from the 30000 individual models:
+```{r eval=FALSE}
+for (looprun in 1:length(seeds)) {
+  if (looprun == 1) {
+    start <- Sys.time()
+  }
+  
+  if (looprun > 1) {
+    ## Clear last round of outputs:
+    keep.objects <- 
+      c("biomod_loop", "model.params", "prep_env", # functions
+        "crs", "crs19N", "n.cores", "nb.cpu", "n.pab", "n.pab.c", "seeds", # inputs
+        "trialname", "points", "cL.points.all", "user.val", "cL_user_val", # inputs
+        "prepped_env", "period", "hucsize", "var.import", "select.thresh", # inputs
+        "cL_EM_scores", "cL_ensemble_evals", "cL_ind_evals", # master outputs
+        "cL_EM", "cL_var_imp", "i", "looprun" # master outputs
+      )
+    rm(list = setdiff(ls(), keep.objects)) # remove all intermediate data
+  }
+  
+  ## Create and evaluate ensemble model with seed looprun:
+  cL_new_outputs <- 
+    biomod_loop(
+      i = looprun,
+      points = cL.points.all, 
+      period = "Current", 
+      hucsize = "huc12",
+      crs = crs19N,
+      n.pab = n.pab.c, # number of pseudoabsences
+      nb.cpu = 1,
+      var.import = 10,
+      user.val = cL_user_val, 
+      select.thresh = 0.5 # threshold TSS score 
+      ) 
+ 
+  ## Add new outputs to lists and dataframes of all outputs:
+  if (looprun == 1) {
+    cL_ind_evals <- cL_new_outputs[["new_evals"]]
+    cL_EM_scores <- cL_new_outputs[["new_em_scores"]]
+    cL_ensemble_evals <- cL_new_outputs[["new_em_evals"]]
+    cL_var_imp <- cL_new_outputs[["var.imp.new"]]
+    if (length(cL_new_outputs[["EM.list"]]) >= 1) {
+      cL_EM[[looprun]] <- cL_new_outputs[["EM.list"]] 
+    }
+    
+  } else {
+    cL_ind_evals <- rbind(cL_ind_evals, cL_new_outputs[["new_evals"]])
+    cL_EM_scores <- rbind(cL_EM_scores, cL_new_outputs[["new_em_scores"]])
+    cL_ensemble_evals <- rbind(cL_ensemble_evals, cL_new_outputs[["new_em_evals"]])
+    cL_var_imp <- rbind(cL_var_imp, cL_new_outputs[["var.imp.new"]])
+    if (length(cL_new_outputs[["EM.list"]]) >= 1) {
+      cL_EM[[looprun]] <- cL_new_outputs[["EM.list"]]
+    }
+  }
+  
+  ## Save outputs:
+  write.csv(cL_ind_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-individual.csv"), 
+            row.names = FALSE)
+  write.csv(cL_EM_scores, 
+            paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"), 
+            row.names = FALSE)
+  write.csv(cL_ensemble_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"), 
+            row.names = FALSE)
+  write.csv(cL_var_imp, 
+            paste0("./biomod/", trialname, "_MasterVariableImportance.csv"), 
+            row.names = FALSE)
+  saveRDS(cL_EM, paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+  
+  if (looprun == 1000) {
+    end <- Sys.time()
+  }
+}
+end - start # 11.41136 mins for 10 loopruns
+```
+
+Format data for final model:
+```{r}
+## Add column for presence-only data:
+cL.points.all$pab <- NA
+cL.points.all[!is.na(cL.points.all$cOccu) & cL.points.all$cOccu == 1,]$pab <- 1 # assign 1 to historic presence points
+ 
+## New points at which to predict occupancy:
+cL.occ.all1 <- cL.points.all %>% dplyr::select(huc, pab, X, Y)
+rownames(cL.occ.all1) <- cL.occ.all1$huc
+cL.occ.all <- cL.occ.all1 %>% dplyr::select(-huc) %>% 
+  st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs19N))
+cL.resp.all <- cL.occ.all %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+  as.matrix(.) %>% as.numeric(.)
+cL.index.all <- cbind(huc=row.names(cL.occ.all), ID=1:length(cL.resp.all)) %>% as.data.frame(.)
+cL.index.all$ID <- as.numeric(cL.index.all$ID)
+
+## Create data.frames of coordinates:
+cL.coords.all <- as.data.frame(st_coordinates(cL.occ.all))
+
+## Create data.frames of explanatory variables:
+cL.env.all <- cL.points.all %>% dplyr::select(-huc,-cOccu,-pab,-X,-Y) %>%
+  as.data.frame(.)
+
+## Format for biomod:
+cL_format_all <- BIOMOD_FormatingData(resp.name = paste0("BDS.", trialname),
+                                  resp.var = cL.resp.all, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+                                  expl.var = cL.env.all, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+                                  dir.name = "./biomod", # modeling folder
+                                  resp.xy = cL.coords.all,
+                                  PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+                                  PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+                                  PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+                                  na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+
+cL_true_occu <- cL_format_all@data.species # vector of actual occupancy data
+```
+
+Find the weighted mean prediction at each point: 
+```{r}
+cL_predict_all1 <- read.csv("./biomod/cL_predict_all_intermediate.csv", header = TRUE, row.names = 1)
+colnames(cL_predict_all1)[2:1001] <- c(1:1000)
+cL_predict_all <- as.matrix(cL_predict_all1)
+
+## Find models with more than 1 threshold value:
+mult.thresh <- modeest::mfv(cL_ensemble_evals[which(!is.na(cL_ensemble_evals$threshold) & cL_ensemble_evals$threshold != -Inf & cL_ensemble_evals$threshold != Inf),]$looprun)
+
+num.thresh <- c()
+for (i in 1:length(mult.thresh)) {
+  num.thresh[i] <- nrow(cL_ensemble_evals[cL_ensemble_evals$looprun == mult.thresh[i],])
+}
+cL_ensemble_evals[which(cL_ensemble_evals$looprun %in% mult.thresh),]$TSS # each pair will have the same TSS
+
+mods.to.keep.cL <- 
+  cL_ensemble_evals[which(
+    !is.na(cL_ensemble_evals$threshold) & 
+    cL_ensemble_evals$threshold != -Inf & 
+    cL_ensemble_evals$threshold != Inf),] %>% 
+  group_by(looprun) %>% 
+  summarise(TSS = mean(TSS), .groups = "drop")
+weight.vec1 <- mods.to.keep.cL$TSS
+weight.vec.cL <- weight.vec1 / sum(weight.vec1)
+saveRDS(weight.vec.cL, "./biomod/cL_weight_vector.RDS")
+
+col.index <- which(colnames(cL_predict_all) %in% mods.to.keep.cL$looprun)
+mean.pred <- 
+  matrixStats::rowWeightedMeans(
+    cL_predict_all[,col.index], 
+    na.rm = FALSE, 
+    w = weight.vec.cL)
+cL_predict_all <- cL_predict_all %>% as.data.frame(.) %>% mutate(mean_pred = mean.pred)
+head(cL_predict_all$mean_pred)
+cL_predict_all$ID <- rownames(cL_predict_all)
+cL_predict_all$ID <- as.numeric(cL_predict_all$ID)
+cL_predict_all <- cL_predict_all %>% left_join(., as.data.frame(cL.index.all), by="ID")
+
+## Save outputs:
+write.csv(cL_predict_all, "./biomod/cL_final_predictions2.csv")
+```
+
+Find the mean threshold value across all models:
+```{r}
+## Load outputs:
+cL_predict_all <- read.csv("./biomod/cL_final_predictions2.csv", header = TRUE, row.names = 1)
+
+cL_predict_huc <- cL_predict_all %>% 
+  dplyr::rename(looprun = ID) %>%  
+  dplyr::select(looprun, mean_pred, huc)
+
+cL_thresholds_all <- cL_predict_huc %>% 
+  right_join(., cL_ensemble_evals, by = "looprun") %>% 
+  filter(!is.na(threshold)) %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  dplyr::select(looprun, TSS, threshold)
+
+modeest::mfv(cL_thresholds_all$looprun) == mult.thresh # should be TRUE
+
+weight.vec1 <- cL_thresholds_all$TSS
+weight.vec <- weight.vec1 / sum(weight.vec1)
+
+cL_threshold <- 
+  stats::weighted.mean(
+    cL_thresholds_all$threshold, 
+    w = weight.vec, na.rm = FALSE)
+saveRDS(cL_threshold, "./biomod/cL_weightedmeanthresh.RDS")
+# cL.points.pred <- 
+#   cL.points.all %>% 
+#   left_join(., cL_predict_huc, by="huc") %>% 
+#   mutate(pred_occu = ifelse(mean.pred > cL_threshold_all, 1, 0)) %>% 
+#   st_as_sf(., coords=c("X","Y"), remove=TRUE, crs=st_crs(crs19N))
+# 
+# plot(cL.points.pred["mean.pred"])
+# plot(cL.points.pred["pred_occu"])
+```
+
+Make a shapefile of predictions at each HUC:
+```{r}
+cL.poly <- 
+  st_read("./biomod/input_huc12_poly.shp") %>% 
+  dplyr::select(huc) %>%
+  left_join(., cL_predict_huc, by = "huc") %>%
+  mutate(pred_occu = ifelse(mean_pred > cL_threshold, 1, 0))
+
+plot(cL.poly["mean_pred"])
+plot(cL.poly["pred_occu"])
+
+st_write(cL.poly, "./biomod/cL_final_prediction.shp", append = FALSE) # save shapefile
+```
+
+# Historical period (1898-2008)
+
+## Fine scale
+
+Prepare inputs:
+```{r}
+prepped_env <- prep_env(shp = "./biomod/input_points_S_pa_hist.shp", 
+                        period = "Historical", 
+                        hucsize = "small")
+
+n.pab.h <- prepped_env[["n.pab"]] 
+hS.points.all <- prepped_env[["points.all1"]]
+```
+
+Set model hyperparameters:
+```{r}
+hS_user_val <- model.params(n.cores = 1)
+```
+
+Define for-loop outputs:
+```{r}
+trialname <- "hS"
+hS_EM <- list()
+```
+
+If computer shuts down and model needs to be restarted:
+```{r}
+hS_ind_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-individual.csv"),
+                         check.names = FALSE)
+hS_EM_scores <- read.csv(paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"),
+                         check.names = FALSE)
+hS_ensemble_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"),
+                              check.names=FALSE)
+hS_var_imp <- read.csv(paste0("./biomod/", trialname, "_MasterVariableImportance.csv"),
+                       check.names=FALSE)
+hS_EM <- readRDS(paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+max(hS_ensemble_evals$looprun) # restart from next seed number
+```
+
+Generate 1000 ensemble models from the 30000 individual models:
+```{r eval=FALSE}
+for (looprun in 1:length(seeds)) {
+  if (looprun == 1) {
+    start <- Sys.time()
+  }
+  
+  if (looprun > 1) {
+    ## Clear last round of outputs:
+    keep.objects <- 
+      c("biomod_loop", "model.params", "prep_env", # functions
+        "crs", "crs19N", "n.cores", "nb.cpu", "n.pab", "n.pab.h", "seeds", # inputs
+        "trialname", "points", "hS.points.all", "user.val", "hS_user_val", # inputs
+        "prepped_env", "period", "hucsize", "var.import", "select.thresh", # inputs
+        "hS_EM_scores", "hS_ensemble_evals", "hS_ind_evals", # master outputs
+        "hS_EM", "hS_var_imp", "i", "looprun" # master outputs
+      )
+    rm(list = setdiff(ls(), keep.objects)) # remove all intermediate data
+  }
+  
+  ## Create and evaluate ensemble model with seed i:
+  hS_new_outputs <- 
+    biomod_loop(
+      i = looprun,
+      points = hS.points.all, 
+      period = "Historical", 
+      hucsize = "small",
+      crs = crs19N,
+      n.pab = n.pab.h, # number of pseudoabsences
+      nb.cpu = 1,
+      var.import = 10,
+      user.val = hS_user_val, 
+      select.thresh = 0.5 # threshold TSS score 
+      ) 
+ 
+  ## Add new outputs to lists and dataframes of all outputs:
+  if (looprun == 1) {
+    hS_ind_evals <- hS_new_outputs[["new_evals"]]
+    hS_EM_scores <- hS_new_outputs[["new_em_scores"]]
+    hS_ensemble_evals <- hS_new_outputs[["new_em_evals"]]
+    hS_var_imp <- hS_new_outputs[["var.imp.new"]]
+    if (length(hS_new_outputs[["EM.list"]]) >= 1) {
+      hS_EM[[looprun]] <- hS_new_outputs[["EM.list"]] 
+    }
+    
+  } else {
+    hS_ind_evals <- rbind(hS_ind_evals, hS_new_outputs[["new_evals"]])
+    hS_EM_scores <- rbind(hS_EM_scores, hS_new_outputs[["new_em_scores"]])
+    hS_ensemble_evals <- rbind(hS_ensemble_evals, hS_new_outputs[["new_em_evals"]])
+    hS_var_imp <- rbind(hS_var_imp, hS_new_outputs[["var.imp.new"]])
+    if (length(hS_new_outputs[["EM.list"]]) >= 1) {
+      hS_EM[[looprun]] <- hS_new_outputs[["EM.list"]]
+    }
+  }
+  
+  ## Save outputs:
+  write.csv(hS_ind_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-individual.csv"), 
+            row.names = FALSE)
+  write.csv(hS_EM_scores, 
+            paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"), 
+            row.names = FALSE)
+  write.csv(hS_ensemble_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"), 
+            row.names = FALSE)
+  write.csv(hS_var_imp, 
+            paste0("./biomod/", trialname, "_MasterVariableImportance.csv"), 
+            row.names = FALSE)
+  saveRDS(hS_EM, paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+  
+  if (looprun == 1000) {
+    end <- Sys.time()
+  }
+}
+end - start # 11.41136 mins for 10 loopruns
+```
+
+Format data for final model:
+```{r}
+## Add column for presence-only data:
+hS.points.all$pab <- NA
+hS.points.all[!is.na(hS.points.all$hOccu) & hS.points.all$hOccu == 1,]$pab <- 1 # assign 1 to historic presence points
+ 
+## New points at which to predict occupancy:
+hS.occ.all1 <- hS.points.all %>% dplyr::select(huc, pab, X, Y)
+rownames(hS.occ.all1) <- hS.occ.all1$huc
+hS.occ.all <- hS.occ.all1 %>% dplyr::select(-huc) %>% 
+  st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs19N))
+hS.resp.all <- hS.occ.all %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+  as.matrix(.) %>% as.numeric(.)
+hS.index.all <- cbind(huc=row.names(hS.occ.all), ID=1:length(hS.resp.all)) %>% as.data.frame(.)
+hS.index.all$ID <- as.numeric(hS.index.all$ID)
+
+## Create data.frames of coordinates:
+hS.coords.all <- as.data.frame(st_coordinates(hS.occ.all))
+
+## Create data.frames of explanatory variables:
+hS.env.all <- hS.points.all %>% dplyr::select(-huc,-hOccu,-pab,-X,-Y) %>%
+  as.data.frame(.)
+
+## Format for biomod:
+hS_format_all <- BIOMOD_FormatingData(resp.name = paste0("BDS.", trialname),
+                                  resp.var = hS.resp.all, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+                                  expl.var = hS.env.all, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+                                  dir.name = "./biomod", # modeling folder
+                                  resp.xy = hS.coords.all,
+                                  PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+                                  PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+                                  PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+                                  na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+
+hS_true_occu <- hS_format_all@data.species # vector of actual occupancy data
+```
+
+Create output dataframe of predictions for each seed:
+```{r}
+hS_predict_all1 <- as.data.frame(matrix(NA, nrow=nrow(hS.points.all), ncol = (length(seeds)+1)))
+colnames(hS_predict_all1)[1] <- "true_occu"
+hS_predict_all1[,1] <- hS_true_occu
+
+for (looprun in 1:length(seeds)) {
+  if (length(hS_EM[[looprun]]) == 1) {
+    EM_forecast <- # predict presence across combined calibration + validation data
+        BIOMOD_EnsembleForecasting(
+          bm.em = hS_EM[[looprun]],
+          proj.name = paste0("BDS.", trialname), # folder based on which input data is used
+          new.env = hS_format_all@data.env.var,
+          new.env.xy = hS_format_all@coord,
+          models.chosen = 'all',
+          metric.binary = 'TSS',
+          nb.cpu = nb.cpu) 
+      
+  predict <- get_predictions(EM_forecast) # get predictions from forecast
+  new.predict <- # create vector of predictions
+    predict %>% 
+    filter(filtered.by == "TSS") %>% 
+    filter(algo == "EMwmean") %>% 
+    dplyr::select(pred) %>% 
+    unlist(.) %>% 
+    unname(.)
+  } 
+  if (length(hS_EM[[looprun]]) == 0) {
+    new.predict <- rep(NA, nrow(hS.points.all))
+    
+  }
+  hS_predict_all1[,(looprun+1)] <- new.predict
+}
+```
+
+Find the weighted mean prediction at each point: 
+```{r}
+hS_predict_all1 <- read.csv("./biomod/hS_predict_all_intermediate.csv", header = TRUE, row.names = 1)
+colnames(hS_predict_all1)[2:1001] <- c(1:1000)
+hS_predict_all <- as.matrix(hS_predict_all1)
+
+## Find models with more than 1 threshold value:
+mult.thresh <- modeest::mfv(hS_ensemble_evals[which(!is.na(hS_ensemble_evals$threshold) & hS_ensemble_evals$threshold != -Inf & hS_ensemble_evals$threshold != Inf),]$looprun)
+
+num.thresh <- c()
+for (i in 1:length(mult.thresh)) {
+  num.thresh[i] <- nrow(hS_ensemble_evals[hS_ensemble_evals$looprun == mult.thresh[i],])
+}
+hS_ensemble_evals[which(hS_ensemble_evals$looprun %in% mult.thresh),]$TSS # each pair will have the same TSS
+
+mods.to.keep.hS <- 
+  hS_ensemble_evals[which(
+    !is.na(hS_ensemble_evals$threshold) & 
+    hS_ensemble_evals$threshold != -Inf & 
+    hS_ensemble_evals$threshold != Inf),] %>% 
+  group_by(looprun) %>% 
+  summarise(TSS = mean(TSS), .groups = "drop")
+weight.vec1 <- mods.to.keep.hS$TSS
+weight.vec.hS <- weight.vec1 / sum(weight.vec1)
+saveRDS(weight.vec.hS, "./biomod/hS_weight_vector.RDS")
+
+col.index <- which(colnames(hS_predict_all) %in% mods.to.keep.hS$looprun)
+
+mean.pred <- 
+  matrixStats::rowWeightedMeans(
+    hS_predict_all[,col.index], 
+    na.rm = FALSE, 
+    w = weight.vec.hS)
+hS_predict_all <- hS_predict_all %>% as.data.frame(.) %>% mutate(mean_pred = mean.pred)
+head(hS_predict_all$mean_pred)
+hS_predict_all$ID <- rownames(hS_predict_all)
+hS_predict_all$ID <- as.numeric(hS_predict_all$ID)
+hS_predict_all <- hS_predict_all %>% left_join(., as.data.frame(hS.index.all), by="ID")
+
+## Save outputs:
+write.csv(hS_predict_all, "./biomod/hS_final_predictions.csv")
+```
+
+Find the mean threshold value across all models:
+```{r}
+## Load outputs:
+hS_predict_all <- read.csv("./biomod/hS_final_predictions.csv", header = TRUE, row.names = 1)
+
+hS_predict_huc <- hS_predict_all %>% 
+  dplyr::rename(looprun = ID) %>%  
+  dplyr::select(looprun, mean_pred, huc)
+
+hS_thresholds_all <- hS_predict_huc %>% 
+  right_join(., hS_ensemble_evals, by = "looprun") %>% 
+  filter(!is.na(threshold)) %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  dplyr::select(looprun, TSS, threshold)
+
+modeest::mfv(hS_thresholds_all$looprun) == mult.thresh # should be TRUE
+
+weight.vec1 <- hS_thresholds_all$TSS
+weight.vec <- weight.vec1 / sum(weight.vec1)
+
+hS_threshold <- 
+  stats::weighted.mean(
+    hS_thresholds_all$threshold, 
+    w = weight.vec, na.rm = FALSE)
+saveRDS(hS_threshold, "./biomod/hS_weightedmeanthresh.RDS")
+# hS.points.pred <- 
+#   hS.points.all %>% 
+#   left_join(., hS_predict_huc, by="huc") %>% 
+#   mutate(pred_occu = ifelse(mean.pred > hS_threshold_all, 1, 0)) %>% 
+#   st_as_sf(., coords=c("X","Y"), remove=TRUE, crs=st_crs(crs19N))
+# 
+# plot(hS.points.pred["mean.pred"])
+# plot(hS.points.pred["pred_occu"])
+```
+
+Make a shapefile of predictions at each HUC:
+```{r}
+hS.poly <- 
+  st_read("./biomod/input_small_hucs_poly.shp") %>% 
+  dplyr::select(huc) %>%
+  left_join(., hS_predict_huc, by = "huc") %>%
+  mutate(pred_occu = ifelse(mean_pred > hS_threshold, 1, 0))
+
+plot(hS.poly["mean_pred"])
+plot(hS.poly["pred_occu"])
+
+st_write(hS.poly, "./biomod/hS_final_prediction.shp", append = FALSE) # save shapefile
+```
+
+## Coarse scale
+
+Prepare inputs:
+```{r}
+prepped_env <- prep_env(shp = "./biomod/input_points_L_pa_hist.shp", 
+                        period = "Historical", 
+                        hucsize = "huc12")
+
+n.pab.h <- prepped_env[["n.pab"]] 
+hL.points.all <- prepped_env[["points.all1"]]
+```
+
+Set model hyperparameters:
+```{r}
+hL_user_val <- model.params(n.cores = 1)
+```
+
+Define for-loop outputs:
+```{r}
+trialname <- "hL"
+hL_EM <- list()
+```
+
+If computer shuts down and model needs to be restarted:
+```{r}
+hL_ind_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-individual.csv"),
+                         check.names = FALSE)
+hL_EM_scores <- read.csv(paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"),
+                         check.names = FALSE)
+hL_ensemble_evals <- read.csv(paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"),
+                              check.names=FALSE)
+
+hL_var_imp <- read.csv(paste0("./biomod/", trialname, "_MasterVariableImportance.csv"),
+                       check.names=FALSE)
+hL_EM <- readRDS(paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+max(hL_ensemble_evals$looprun) # restart from next seed number
+```
+
+Generate 1000 ensemble models from the 30000 individual models:
+```{r eval=FALSE}
+for (looprun in 1:length(seeds)) {
+  if (looprun == 1) {
+    start <- Sys.time()
+  }
+  
+  if (looprun > 1) {
+    ## Clear last round of outputs:
+    keep.objects <- 
+      c("biomod_loop", "model.params", "prep_env", # functions
+        "crs", "crs19N", "n.cores", "nb.cpu", "n.pab", "n.pab.h", "seeds", # inputs
+        "trialname", "points", "hL.points.all", "user.val", "hL_user_val", # inputs
+        "prepped_env", "period", "hucsize", "var.import", "select.thresh", # inputs
+        "hL_EM_scores", "hL_ensemble_evals", "hL_ind_evals", # master outputs
+        "hL_EM", "hL_var_imp", "i", "looprun" # master outputs
+      )
+    rm(list = setdiff(ls(), keep.objects)) # remove all intermediate data
+  }
+  
+  ## Create and evaluate ensemble model with seed i:
+  hL_new_outputs <- 
+    biomod_loop(
+      i = looprun,
+      points = hL.points.all, 
+      period = "Historical", 
+      hucsize = "huc12",
+      crs = crs19N,
+      n.pab = n.pab.h, # number of pseudoabsences
+      nb.cpu = 1,
+      var.import = 10,
+      user.val = hL_user_val, 
+      select.thresh = 0.5 # threshold TSS score 
+      ) 
+ 
+  ## Add new outputs to lists and dataframes of all outputs:
+  if (looprun == 1) {
+    hL_ind_evals <- hL_new_outputs[["new_evals"]]
+    hL_EM_scores <- hL_new_outputs[["new_em_scores"]]
+    hL_ensemble_evals <- hL_new_outputs[["new_em_evals"]]
+    hL_var_imp <- hL_new_outputs[["var.imp.new"]]
+    if (length(hL_new_outputs[["EM.list"]]) >= 1) {
+      hL_EM[[looprun]] <- hL_new_outputs[["EM.list"]] 
+    }
+    
+  } else {
+    hL_ind_evals <- rbind(hL_ind_evals, hL_new_outputs[["new_evals"]])
+    hL_EM_scores <- rbind(hL_EM_scores, hL_new_outputs[["new_em_scores"]])
+    hL_ensemble_evals <- rbind(hL_ensemble_evals, hL_new_outputs[["new_em_evals"]])
+    hL_var_imp <- rbind(hL_var_imp, hL_new_outputs[["var.imp.new"]])
+    if (length(hL_new_outputs[["EM.list"]]) >= 1) {
+      hL_EM[[looprun]] <- hL_new_outputs[["EM.list"]]
+    }
+  }
+  
+  ## Save outputs:
+  write.csv(hL_ind_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-individual.csv"), 
+            row.names = FALSE)
+  write.csv(hL_EM_scores, 
+            paste0("./biomod/", trialname, "_MasterEnsembleScores.csv"), 
+            row.names = FALSE)
+  write.csv(hL_ensemble_evals, 
+            paste0("./biomod/", trialname, "_MasterEvals-ensemble.csv"), 
+            row.names = FALSE)
+  write.csv(hL_var_imp, 
+            paste0("./biomod/", trialname, "_MasterVariableImportance.csv"), 
+            row.names = FALSE)
+  saveRDS(hL_EM, paste0("./biomod/", trialname, "_MasterEModelList.RDS"))
+  
+  if (looprun == 1000) {
+    end <- Sys.time()
+  }
+}
+end - start # 11.41136 mins for 10 loopruns with 3 var.import
+```
+
+Format data for final model:
+```{r}
+## Add column for presence-only data:
+hL.points.all$pab <- NA
+hL.points.all[!is.na(hL.points.all$hOccu) & hL.points.all$hOccu == 1,]$pab <- 1 # assign 1 to historic presence points
+ 
+## New points at which to predict occupancy:
+hL.occ.all1 <- hL.points.all %>% dplyr::select(huc, pab, X, Y)
+rownames(hL.occ.all1) <- hL.occ.all1$huc
+hL.occ.all <- hL.occ.all1 %>% dplyr::select(-huc) %>% 
+  st_as_sf(., coords=c("X","Y"), remove=T, crs=st_crs(crs19N))
+hL.resp.all <- hL.occ.all %>% dplyr::select(pab) %>% st_drop_geometry(.) %>% 
+  as.matrix(.) %>% as.numeric(.)
+hL.index.all <- cbind(huc=row.names(hL.occ.all), ID=1:length(hL.resp.all)) %>% as.data.frame(.)
+hL.index.all$ID <- as.numeric(hL.index.all$ID)
+
+## Create data.frames of coordinates:
+hL.coords.all <- as.data.frame(st_coordinates(hL.occ.all))
+
+## Create data.frames of explanatory variables:
+hL.env.all <- hL.points.all %>% dplyr::select(-huc,-hOccu,-pab,-X,-Y) %>%
+  as.data.frame(.)
+
+## Format for biomod:
+hL_format_all <- BIOMOD_FormatingData(resp.name = paste0("BDS.", trialname),
+                                  resp.var = hL.resp.all, # a vector containing binary data (0: absence, 1: presence, NA: indeterminate) for a single species that will be used to build the species distribution model
+                                  expl.var = hL.env.all, # a data.frame containing the explanatory variables (in columns or layers) that will be used to build the species distribution model(s)
+                                  dir.name = "./biomod", # modeling folder
+                                  resp.xy = hL.coords.all,
+                                  PA.nb.rep = 0, # an integer corresponding to the number of sets (repetitions) of pseudo-absence points that will be drawn 
+                                  PA.nb.absences = 0, # number of pseudo-absence points that will be selected for each pseudo-absence repetition (true absences included)
+                                  PA.strategy = NULL, # a character defining the strategy that will be used to select the pseudo-absence points
+                                  na.rm = TRUE # A logical value defining whether points having one or several missing values for explanatory variables should be removed from the analysis or not
+    )
+
+hL_true_occu <- hL_format_all@data.species # vector of actual occupancy data
+```
+
+Create output dataframe of predictions for each seed:
+```{r}
+hL_predict_all1 <- as.data.frame(matrix(NA, nrow=nrow(hL.points.all), ncol = (length(seeds)+1)))
+colnames(hL_predict_all1)[1] <- "true_occu"
+hL_predict_all1[,1] <- hL_true_occu
+
+for (looprun in 1:length(seeds)) {
+  if (length(hL_EM[[looprun]]) == 1) {
+    EM_forecast <- # predict presence across combined calibration + validation data
+        BIOMOD_EnsembleForecasting(
+          bm.em = hL_EM[[looprun]],
+          proj.name = paste0("BDS.", trialname), # folder based on which input data is used
+          new.env = hL_format_all@data.env.var,
+          new.env.xy = hL_format_all@coord,
+          models.chosen = 'all',
+          metric.binary = 'TSS',
+          nb.cpu = nb.cpu) 
+      
+  predict <- get_predictions(EM_forecast) # get predictions from forecast
+  new.predict <- # create vector of predictions
+    predict %>% 
+    filter(filtered.by == "TSS") %>% 
+    filter(algo == "EMwmean") %>% 
+    dplyr::select(pred) %>% 
+    unlist(.) %>% 
+    unname(.)
+  } 
+  if (length(hL_EM[[looprun]]) == 0) {
+    new.predict <- rep(NA, nrow(hL.points.all))
+    
+  }
+  hL_predict_all1[,(looprun+1)] <- new.predict
+}
+```
+
+Find the weighted mean prediction at each point: 
+```{r}
+hL_predict_all1 <- read.csv("./biomod/hL_predict_all_intermediate.csv", header = TRUE, row.names = 1)
+colnames(hL_predict_all1)[2:1001] <- c(1:1000)
+hL_predict_all <- as.matrix(hL_predict_all1)
+
+## Find models with more than 1 threshold value:
+mult.thresh <- modeest::mfv(hL_ensemble_evals[which(!is.na(hL_ensemble_evals$threshold) & hL_ensemble_evals$threshold != -Inf & hL_ensemble_evals$threshold != Inf),]$looprun)
+
+num.thresh <- c()
+for (i in 1:length(mult.thresh)) {
+  num.thresh[i] <- nrow(hL_ensemble_evals[hL_ensemble_evals$looprun == mult.thresh[i],])
+}
+hL_ensemble_evals[which(hL_ensemble_evals$looprun %in% mult.thresh),]$TSS # each pair will have the same TSS
+
+mods.to.keep.hL <- 
+  hL_ensemble_evals[which(
+    !is.na(hL_ensemble_evals$threshold) & 
+    hL_ensemble_evals$threshold != -Inf & 
+    hL_ensemble_evals$threshold != Inf),] %>% 
+  group_by(looprun) %>% 
+  summarise(TSS = mean(TSS), .groups = "drop")
+weight.vec1 <- mods.to.keep.hL$TSS
+weight.vec.hL <- weight.vec1 / sum(weight.vec1)
+col.index <- which(colnames(hL_predict_all) %in% mods.to.keep.hL$looprun)
+mean.pred <- 
+  matrixStats::rowWeightedMeans(
+    hL_predict_all[,col.index], 
+    na.rm = FALSE, 
+    w = weight.vec.hL)
+hL_predict_all <- hL_predict_all %>% as.data.frame(.) %>% mutate(mean_pred = mean.pred)
+head(hL_predict_all$mean_pred)
+hL_predict_all$ID <- rownames(hL_predict_all)
+hL_predict_all$ID <- as.numeric(hL_predict_all$ID)
+hL_predict_all <- hL_predict_all %>% left_join(., as.data.frame(hL.index.all), by="ID")
+
+## Save outputs:
+write.csv(hL_predict_all, "./biomod/hL_final_predictions.csv")
+```
+
+Find the mean threshold value across all models:
+```{r}
+## Load outputs:
+hL_predict_all <- read.csv("./biomod/hL_final_predictions.csv", header = TRUE, row.names = 1)
+
+hL_predict_huc <- hL_predict_all %>% 
+  dplyr::rename(looprun = ID) %>%  
+  dplyr::select(looprun, mean_pred, huc)
+
+hL_thresholds_all <- hL_predict_huc %>% 
+  right_join(., hL_ensemble_evals, by = "looprun") %>% 
+  filter(!is.na(threshold)) %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  dplyr::select(looprun, TSS, threshold)
+
+modeest::mfv(hL_thresholds_all$looprun) == mult.thresh # should be TRUE
+
+weight.vec1 <- hL_thresholds_all$TSS
+weight.vec.hL <- weight.vec1 / sum(weight.vec1)
+saveRDS(weight.vec.hL, "./biomod/hL_weight_vector.RDS")
+
+hL_threshold <- 
+  stats::weighted.mean(
+    hL_thresholds_all$threshold, 
+    w = weight.vec, na.rm = FALSE)
+saveRDS(hL_threshold, "./biomod/hL_weightedmeanthresh.RDS")
+# hL.points.pred <- 
+#   hL.points.all %>% 
+#   left_join(., hL_predict_huc, by="huc") %>% 
+#   mutate(pred_occu = ifelse(mean.pred > hL_threshold_all, 1, 0)) %>% 
+#   st_as_sf(., coords=c("X","Y"), remove=TRUE, crs=st_crs(crs19N))
+# 
+# plot(hL.points.pred["mean.pred"])
+# plot(hL.points.pred["pred_occu"])
+```
+
+Make a shapefile of predictions at each HUC:
+```{r}
+hL.poly <- 
+  st_read("./biomod/input_huc12_poly.shp") %>% 
+  dplyr::select(huc) %>%
+  left_join(., hL_predict_huc, by = "huc") %>%
+  mutate(pred_occu = ifelse(mean_pred > hL_threshold, 1, 0))
+
+plot(hL.poly["mean_pred"])
+plot(hL.poly["pred_occu"])
+
+st_write(hL.poly, "./biomod/hL_final_prediction.shp", append = FALSE) # save shapefile
+```
+
+# Summary statistics
+
+## Area covered (total)
+
+Shapefiles:
+```{r}
+cS_poly <- st_read("./biomod/cS_final_prediction.shp")
+cL_poly <- st_read("./biomod/cL_final_prediction.shp")
+hS_poly <- st_read("./biomod/hS_final_prediction.shp")
+hL_poly <- st_read("./biomod/hL_final_prediction.shp")
+
+## Current, small
+cS_poly_sum <- 
+  cS_poly %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") %>% 
+  vect(.) 
+cS_poly_sum$area_covered <- NA
+total_area <- cS_poly_sum %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+cS_poly_sum[!is.na(cS_poly_sum$pred_occu) & cS_poly_sum$pred_occu == 0]$area_covered <- terra::expanse(cS_poly_sum, unit = "km")[1] # area of absence polygons
+cS_poly_sum[!is.na(cS_poly_sum$pred_occu) & cS_poly_sum$pred_occu == 1]$area_covered <- terra::expanse(cS_poly_sum, unit = "km")[2] # area of presence polygons
+
+cS_poly_sum <- cS_poly_sum %>% st_as_sf(.) %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cS") %>% mutate(state = "Total")
+
+plot(cS_poly_sum["pred_occu"]) # lots of little empty spaces where huc14 polygons overlapped or didn't converge
+
+## Current, huc12
+cL_poly_sum <- 
+  cL_poly %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") %>% 
+  vect(.) 
+cL_poly_sum$area_covered <- NA
+total_area <- cL_poly_sum %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+cL_poly_sum[!is.na(cL_poly_sum$pred_occu) & cL_poly_sum$pred_occu == 0]$area_covered <- terra::expanse(cL_poly_sum, unit = "km")[1] # area of absence polygons
+cL_poly_sum[!is.na(cL_poly_sum$pred_occu) & cL_poly_sum$pred_occu == 1]$area_covered <- terra::expanse(cL_poly_sum, unit = "km")[2] # area of presence polygons
+
+cL_poly_sum <- cL_poly_sum %>% st_as_sf(.) %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cL") %>% mutate(state = "Total")
+
+plot(cL_poly_sum["pred_occu"]) 
+
+## Historical, small
+hS_poly_sum <- 
+  hS_poly %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") %>% 
+  vect(.) 
+hS_poly_sum$area_covered <- NA
+total_area <- hS_poly_sum %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+hS_poly_sum[!is.na(hS_poly_sum$pred_occu) & hS_poly_sum$pred_occu == 0]$area_covered <- terra::expanse(hS_poly_sum, unit = "km")[1] # area of absence polygons
+hS_poly_sum[!is.na(hS_poly_sum$pred_occu) & hS_poly_sum$pred_occu == 1]$area_covered <- terra::expanse(hS_poly_sum, unit = "km")[2] # area of presence polygons
+
+hS_poly_sum <- hS_poly_sum %>% st_as_sf(.) %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hS") %>% mutate(state = "Total")
+
+plot(hS_poly_sum["pred_occu"]) 
+# plot(cS_poly_sum["pred_occu"]) # comparison
+
+## Historical, huc12
+hL_poly_sum <- 
+  hL_poly %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") %>% 
+  vect(.) 
+hL_poly_sum$area_covered <- NA
+total_area <- hL_poly_sum %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+hL_poly_sum[!is.na(hL_poly_sum$pred_occu) & hL_poly_sum$pred_occu == 0]$area_covered <- terra::expanse(hL_poly_sum, unit = "km")[1] # area of absence polygons
+hL_poly_sum[!is.na(hL_poly_sum$pred_occu) & hL_poly_sum$pred_occu == 1]$area_covered <- terra::expanse(hL_poly_sum, unit = "km")[2] # area of presence polygons
+
+hL_poly_sum <- hL_poly_sum %>% st_as_sf(.) %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hL") %>% mutate(state = "Total")
+
+plot(hL_poly_sum["pred_occu"]) 
+plot(cL_poly_sum["pred_occu"])
+```
+
+## Area covered (by state)
+
+Create Maine boundary polygon:
+```{r}
+# me_towns <- vect("./biomodSDM/Maine_Town_and_Townships_Boundary_Polygons_Dissolved_Feature.shp") %>% terra::project(., y = "epsg:26919")
+# ocean <- vect("./Intermediate/Marine_habitats.shp") %>% terra::project(., y = "epsg:26919")
+# 
+# me_bnd <- 
+#   me_towns %>% 
+#   terra::erase(., ocean) %>% 
+#   terra::fillHoles(.) %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>% 
+#   st_transform(., crs=26919) %>% 
+#   st_as_sf(.)
+# 
+# plot(me_bnd)
+# 
+# st_write(me_bnd, "./biomodSDM/Maine_boundary.shp", append = FALSE)
+```
+
+### Maine
+
+Maine statistics:
+```{r}
+me_bnd <- st_read("./biomodSDM/Maine_boundary.shp")
+
+## Current, small:
+cS_me <- 
+  cS_poly %>% 
+  vect(.) %>% 
+  terra::crop(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") 
+cS_me$area_covered <- NA
+
+total_area <- cS_me %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+
+cS_me[!is.na(cS_me$pred_occu) & cS_me$pred_occu == 0,]$area_covered <- terra::expanse(vect(cS_me), unit = "km")[1] # area of absence polygons
+cS_me[!is.na(cS_me$pred_occu) & cS_me$pred_occu == 1,]$area_covered <- terra::expanse(vect(cS_me), unit = "km")[2] # area of presence polygons
+
+cS_me_sum <- cS_me %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cS") %>% mutate(state = "Maine")
+
+## Current, huc12:
+cL_me <- 
+  cL_poly %>% 
+  vect(.) %>% 
+  terra::crop(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") 
+cL_me$area_covered <- NA
+
+total_area <- cL_me %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+
+cL_me[!is.na(cL_me$pred_occu) & cL_me$pred_occu == 0,]$area_covered <- terra::expanse(vect(cL_me), unit = "km")[1] # area of absence polygons
+cL_me[!is.na(cL_me$pred_occu) & cL_me$pred_occu == 1,]$area_covered <- terra::expanse(vect(cL_me), unit = "km")[2] # area of presence polygons
+
+cL_me_sum <- cL_me %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cL") %>% mutate(state = "Maine")
+
+## Historical, small:
+hS_me <- 
+  hS_poly %>% 
+  vect(.) %>% 
+  terra::crop(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") 
+hS_me$area_covered <- NA
+
+total_area <- hS_me %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+
+hS_me[!is.na(hS_me$pred_occu) & hS_me$pred_occu == 0,]$area_covered <- terra::expanse(vect(hS_me), unit = "km")[1] # area of absence polygons
+hS_me[!is.na(hS_me$pred_occu) & hS_me$pred_occu == 1,]$area_covered <- terra::expanse(vect(hS_me), unit = "km")[2] # area of presence polygons
+
+hS_me_sum <- hS_me %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hS") %>% mutate(state = "Maine")
+
+## Historical, huc12:
+hL_me <- 
+  hL_poly %>% 
+  vect(.) %>% 
+  terra::crop(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups="drop") 
+hL_me$area_covered <- NA
+
+total_area <- hL_me %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+
+hL_me[!is.na(hL_me$pred_occu) & hL_me$pred_occu == 0,]$area_covered <- terra::expanse(vect(hL_me), unit = "km")[1] # area of absence polygons
+hL_me[!is.na(hL_me$pred_occu) & hL_me$pred_occu == 1,]$area_covered <- terra::expanse(vect(hL_me), unit = "km")[2] # area of presence polygons
+
+hL_me_sum <- hL_me %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hL") %>% mutate(state = "Maine")
+```
+
+### New Hampshire
+
+New Hampshire stats:
+```{r}
+## Current, small:
+cS_nh <- 
+  cS_poly %>% 
+  vect(.) %>% 
+  terra::erase(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups = "drop")
+cS_nh$area_covered <- NA
+
+total_area <- cS_nh %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+cS_nh[!is.na(cS_nh$pred_occu) & cS_nh$pred_occu == 0,]$area_covered <- terra::expanse(vect(cS_nh), unit = "km")[1] # area of absence polygons
+cS_nh[!is.na(cS_nh$pred_occu) & cS_nh$pred_occu == 1,]$area_covered <- terra::expanse(vect(cS_nh), unit = "km")[2] # area of presence polygons
+
+cS_nh_sum <- cS_nh %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cS") %>% mutate(state = "New Hampshire")
+
+## Current, huc12:
+cL_nh <- 
+  cL_poly %>% 
+  vect(.) %>% 
+  terra::erase(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups = "drop")
+cL_nh$area_covered <- NA
+
+total_area <- cL_nh %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+cL_nh[!is.na(cL_nh$pred_occu) & cL_nh$pred_occu == 0,]$area_covered <- terra::expanse(vect(cL_nh), unit = "km")[1] # area of absence polygons
+cL_nh[!is.na(cL_nh$pred_occu) & cL_nh$pred_occu == 1,]$area_covered <- terra::expanse(vect(cL_nh), unit = "km")[2] # area of presence polygons
+
+cL_nh_sum <- cL_nh %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "cL") %>% mutate(state = "New Hampshire")
+
+## Historical, small:
+hS_nh <- 
+  hS_poly %>% 
+  vect(.) %>% 
+  terra::erase(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups = "drop")
+hS_nh$area_covered <- NA
+
+total_area <- hS_nh %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+hS_nh[!is.na(hS_nh$pred_occu) & hS_nh$pred_occu == 0,]$area_covered <- terra::expanse(vect(hS_nh), unit = "km")[1] # area of absence polygons
+hS_nh[!is.na(hS_nh$pred_occu) & hS_nh$pred_occu == 1,]$area_covered <- terra::expanse(vect(hS_nh), unit = "km")[2] # area of presence polygons
+
+hS_nh_sum <- hS_nh %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hS") %>% mutate(state = "New Hampshire")
+
+## Historical, huc12:
+hL_nh <- 
+  hL_poly %>% 
+  vect(.) %>% 
+  terra::erase(., vect(me_bnd)) %>% 
+  st_as_sf(.) %>% 
+  mutate(present = rep(1, nrow(.))) %>% 
+  group_by(pred_occu) %>% 
+  summarise(count = sum(present), .groups = "drop")
+hL_nh$area_covered <- NA
+
+total_area <- hL_nh %>% vect(.) %>% terra::fillHoles(.) %>% terra::expanse(., unit = "km") %>% sum(.) # Area of all hucs
+hL_nh[!is.na(hL_nh$pred_occu) & hL_nh$pred_occu == 0,]$area_covered <- terra::expanse(vect(hL_nh), unit = "km")[1] # area of absence polygons
+hL_nh[!is.na(hL_nh$pred_occu) & hL_nh$pred_occu == 1,]$area_covered <- terra::expanse(vect(hL_nh), unit = "km")[2] # area of presence polygons
+
+hL_nh_sum <- hL_nh %>% mutate(proportion = (area_covered/total_area)) %>% mutate(model = "hL") %>% mutate(state = "New Hampshire")
+```
+
+Combine spatial statistics:
+```{r}
+## Combine:
+all_poly_sum <- 
+  rbind(st_drop_geometry(hS_me_sum), 
+        st_drop_geometry(cS_me_sum), 
+        st_drop_geometry(hL_me_sum), 
+        st_drop_geometry(cL_me_sum),
+        st_drop_geometry(hS_nh_sum), 
+        st_drop_geometry(cS_nh_sum), 
+        st_drop_geometry(hL_nh_sum), 
+        st_drop_geometry(cL_nh_sum),
+        st_drop_geometry(hS_poly_sum),
+        st_drop_geometry(cS_poly_sum), 
+        st_drop_geometry(hL_poly_sum), 
+        st_drop_geometry(cL_poly_sum)) %>% 
+  filter(!is.na(pred_occu)) %>% 
+  relocate(state) %>% 
+  relocate(model) # make this the first column
+
+## Pivot:
+all_poly_pivot <- 
+  all_poly_sum %>% 
+  filter(pred_occu == 1) %>% 
+  dplyr::select(-count, -proportion, -pred_occu) %>% 
+  pivot_wider(names_from = "model", values_from = "area_covered") %>% 
+  mutate(changeS = (cS - hS)/hS) %>% 
+  mutate(changeL = (cL - hL)/hL) %>% 
+  relocate(changeS, .after = cS)
+all_poly_count <- 
+  all_poly_sum %>% 
+  filter(pred_occu == 1) %>% 
+  dplyr::select(-area_covered, -proportion, -pred_occu) %>% 
+  pivot_wider(names_from = "model", values_from = "count")
+
+all_poly_pivot$hS <- all_poly_count$hS
+all_poly_pivot$cS <- all_poly_count$cS
+all_poly_pivot$hL <- all_poly_count$hL
+all_poly_pivot$cL <- all_poly_count$cL
+
+## Save:
+write.csv(all_poly_sum, "./biomod/Tables/changes_in_area.csv", row.names = FALSE)
+write.csv(all_poly_pivot, "./biomod/Tables/changes_in_area_pivot.csv", row.names = FALSE)
+```
+
+## Change in area
+
+Change in area:
+```{r}
+cS_change <- cS_poly %>% left_join(., st_drop_geometry(hS_poly), by = "huc") %>% mutate(change = pred_occu.x - pred_occu.y) %>% dplyr::select(huc, change)
+
+cL_change <- cL_poly %>% left_join(., st_drop_geometry(hL_poly), by = "huc") %>% mutate(change = pred_occu.x - pred_occu.y) %>% dplyr::select(huc, change)
+
+st_write(cS_change, "./biomod/change_small_hucs.shp", append = FALSE)
+st_write(cL_change, "./biomod/change_large_hucs.shp", append = FALSE)
+```
+
+## Individual model evals
+
+Individual model evaluations:
+```{r}
+## Current:
+cS_ind_evals <- read.csv("./biomod/cS_MasterEvals-individual.csv",
+                         check.names = FALSE)
+cL_ind_evals <- read.csv("./biomod/cL_MasterEvals-individual.csv",
+                         check.names = FALSE)
+## Historical:
+hS_ind_evals <- read.csv("./biomod/hS_MasterEvals-individual.csv",
+                         check.names = FALSE)
+hL_ind_evals <- read.csv("./biomod/hL_MasterEvals-individual.csv",
+                         check.names = FALSE)
+
+## Summaries of individual models:
+cS_ind_sum <- cS_ind_evals %>% dplyr::select(-maxROC, -maxTSS) %>% group_by(model) %>% summarise(cS.AUC = mean(meanROC, na.rm = TRUE), cS.TSS = mean(meanTSS, na.rm = TRUE))
+
+cL_ind_sum <- cL_ind_evals %>% dplyr::select(-maxROC, -maxTSS) %>% group_by(model) %>% summarise(cL.AUC = mean(meanROC, na.rm = TRUE), cL.TSS = mean(meanTSS, na.rm = TRUE))
+
+hS_ind_sum <- hS_ind_evals %>% dplyr::select(-maxROC, -maxTSS) %>% group_by(model) %>% summarise(hS.AUC = mean(meanROC, na.rm = TRUE), hS.TSS = mean(meanTSS, na.rm = TRUE))
+
+hL_ind_sum <- hL_ind_evals %>% dplyr::select(-maxROC, -maxTSS) %>% group_by(model) %>% summarise(hL.AUC = mean(meanROC, na.rm = TRUE), hL.TSS = mean(meanTSS, na.rm = TRUE))
+
+## Combine:
+ind_eval_all <- 
+  hS_ind_sum %>% 
+  left_join(., cS_ind_sum, by = "model") %>% 
+  left_join(., hL_ind_sum, by = "model") %>% 
+  left_join(., cL_ind_sum, by = "model") %>% 
+  mutate(mean.AUC = rowMeans(.[,c("cS.AUC", "cL.AUC", "hS.AUC", "hL.AUC")])) %>% 
+  mutate(mean.TSS = rowMeans(.[,c("cS.TSS", "cL.TSS", "hS.TSS", "hL.TSS")]))
+
+## Save:
+write.csv(ind_eval_all, "./biomod/Tables/ind_eval_all.csv")
+```
+
+## Ensemble model evals
+
+Ensemble model scores (calibration + validation):
+```{r}
+## Current:
+cS_EM_scores <- read.csv("./biomod/cS_MasterEnsembleScores.csv",
+                         check.names = FALSE)
+cL_EM_scores <- read.csv("./biomod/cL_MasterEnsembleScores.csv",
+                         check.names = FALSE)
+## Historical:
+hS_EM_scores <- read.csv("./biomod/hS_MasterEnsembleScores.csv",
+                         check.names = FALSE)
+cS_EM_scores <- read.csv("./biomod/cS_MasterEnsembleScores.csv",
+                         check.names = FALSE)
+```
+
+Ensemble evaluations:
+```{r}
+## Current:
+cS_ensemble_evals <- read.csv("./biomod/cS_MasterEvals-ensemble.csv",
+                              check.names=FALSE)
+cS_threshold <- readRDS("./biomod/cS_weightedmeanthresh.RDS")
+cL_ensemble_evals <- read.csv("./biomod/cL_MasterEvals-ensemble.csv",
+                              check.names=FALSE)
+cL_threshold <- readRDS("./biomod/cL_weightedmeanthresh.RDS")
+## Historical:
+hS_ensemble_evals <- read.csv("./biomod/hS_MasterEvals-ensemble.csv",
+                              check.names=FALSE)
+hS_threshold <- readRDS("./biomod/hS_weightedmeanthresh.RDS")
+hL_ensemble_evals <- read.csv("./biomod/hL_MasterEvals-ensemble.csv",
+                              check.names=FALSE)
+hL_threshold <- readRDS("./biomod/hL_weightedmeanthresh.RDS")
+
+## Summary statistics:
+cS_em_sum <- 
+  cS_ensemble_evals %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  summarise(meanAUC = mean(AUC, na.rm=TRUE), 
+            meanTSS = mean(TSS, na.rm=TRUE), 
+            meanSens = mean(sensitivity, na.rm=TRUE), 
+            meanSpec = mean(specificity, na.rm=TRUE), 
+            meanThresh = mean(threshold, na.rm=TRUE),
+            wmeanThresh = cS_threshold) %>% 
+  mutate(numMods = nrow(cS_ensemble_evals[!is.na(cS_ensemble_evals$threshold),])) %>% 
+  t(.) %>% 
+  as.data.frame(.) %>% 
+  mutate(stat = rownames(.)) %>% 
+  dplyr::rename(cS = V1)
+cS.remove.seeds <- unique(c(cS_ensemble_evals[which(cS_ensemble_evals$threshold == -Inf),]$Seed, cS_ensemble_evals[which(cS_ensemble_evals$threshold == Inf),]$Seed))
+
+cL_em_sum <- 
+  cL_ensemble_evals %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  summarise(meanAUC = mean(AUC, na.rm=TRUE), 
+            meanTSS = mean(TSS, na.rm=TRUE), 
+            meanSens = mean(sensitivity, na.rm=TRUE), 
+            meanSpec = mean(specificity, na.rm=TRUE), 
+            meanThresh = mean(threshold, na.rm=TRUE),
+            wmeanThresh = cL_threshold) %>% 
+  mutate(numMods = nrow(cL_ensemble_evals[!is.na(cL_ensemble_evals$threshold),])) %>% 
+  t(.) %>% 
+  as.data.frame(.) %>% 
+  mutate(stat = rownames(.)) %>% 
+  dplyr::rename(cL = V1)
+cL.remove.seeds <- unique(c(cL_ensemble_evals[which(cL_ensemble_evals$threshold == -Inf),]$Seed, cL_ensemble_evals[which(cL_ensemble_evals$threshold == Inf),]$Seed))
+
+hS_em_sum <- 
+  hS_ensemble_evals %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  summarise(meanAUC = mean(AUC, na.rm=TRUE), 
+            meanTSS = mean(TSS, na.rm=TRUE), 
+            meanSens = mean(sensitivity, na.rm=TRUE), 
+            meanSpec = mean(specificity, na.rm=TRUE), 
+            meanThresh = mean(threshold, na.rm=TRUE),
+            wmeanThresh = hS_threshold) %>% 
+  mutate(numMods = nrow(hS_ensemble_evals[!is.na(hS_ensemble_evals$threshold),])) %>% 
+  t(.) %>% 
+  as.data.frame(.) %>% 
+  mutate(stat = rownames(.)) %>% 
+  dplyr::rename(hS = V1)
+hS.remove.seeds <- unique(c(hS_ensemble_evals[which(hS_ensemble_evals$threshold == -Inf),]$Seed, hS_ensemble_evals[which(hS_ensemble_evals$threshold == Inf),]$Seed))
+
+hL_em_sum <- 
+  hL_ensemble_evals %>% 
+  filter(threshold != -Inf) %>% 
+  filter(threshold != Inf) %>% 
+  summarise(meanAUC = mean(AUC, na.rm=TRUE), 
+            meanTSS = mean(TSS, na.rm=TRUE), 
+            meanSens = mean(sensitivity, na.rm=TRUE), 
+            meanSpec = mean(specificity, na.rm=TRUE), 
+            meanThresh = mean(threshold, na.rm=TRUE),
+            wmeanThresh = hL_threshold) %>% 
+  mutate(numMods = nrow(hL_ensemble_evals[!is.na(hL_ensemble_evals$threshold),])) %>% 
+  t(.) %>% 
+  as.data.frame(.) %>% 
+  mutate(stat = rownames(.)) %>% 
+  dplyr::rename(hL = V1)
+hL.remove.seeds <- unique(c(hL_ensemble_evals[which(hL_ensemble_evals$threshold == -Inf),]$Seed, hL_ensemble_evals[which(hL_ensemble_evals$threshold == Inf),]$Seed))
+
+## Combine:
+em_evals_all <- 
+  hS_em_sum %>% 
+  left_join(., cS_em_sum, by = "stat") %>% 
+  left_join(., hL_em_sum, by = "stat") %>% 
+  left_join(., cL_em_sum, by = "stat") 
+rownames(em_evals_all) <- em_evals_all$stat
+em_evals_all <- em_evals_all %>% 
+  dplyr::select(-stat) %>% 
+  mutate(mean = rowMeans(.))
+em_evals_all$mean["numMods"] <- NA
+
+## Save:
+write.csv(em_evals_all, "./biomod/Tables/em_evals_all.csv", na = ".")
+```
+
+## Variable importance
+
+Variable importance: cS
+```{r}
+cS_var_imp <- read.csv("./biomod/cS_MasterVariableImportance.csv",
+                       check.names=FALSE)
+
+## Committee average:
+cS_var_wide_ca <- cS_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMca") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(cS_var_wide_ca) <- cS_var_wide_ca$expl.var
+
+cS_var_wide_ca <- cS_var_wide_ca %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.cS <- which(colnames(cS_var_wide_ca) %in% mods.to.keep.cS$looprun)
+
+cS_var_imp_ca <- 
+  matrixStats::rowWeightedMeans(
+    cS_var_wide_ca[,col.index.cS], 
+    na.rm = FALSE, 
+    w = weight.vec.cS)
+
+## Weighted mean:
+cS_var_wide_wm <- cS_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMwmean") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(cS_var_wide_wm) <- cS_var_wide_wm$expl.var
+
+cS_var_wide_wm <- cS_var_wide_wm %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.cS <- which(colnames(cS_var_wide_wm) %in% mods.to.keep.cS$looprun)
+
+cS_var_imp_wm <- 
+  matrixStats::rowWeightedMeans(
+    cS_var_wide_wm[,col.index.cS], 
+    na.rm = FALSE, 
+    w = weight.vec.cS)
+```
+
+Variable importance: cL
+```{r}
+cL_var_imp <- read.csv("./biomod/cL_MasterVariableImportance.csv",
+                       check.names=FALSE)
+
+## Committee average:
+cL_var_wide_ca <- cL_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMca") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(cL_var_wide_ca) <- cL_var_wide_ca$expl.var
+
+cL_var_wide_ca <- cL_var_wide_ca %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.cL <- which(colnames(cL_var_wide_ca) %in% mods.to.keep.cL$looprun)
+
+cL_var_imp_ca <- 
+  matrixStats::rowWeightedMeans(
+    cL_var_wide_ca[,col.index.cL], 
+    na.rm = FALSE, 
+    w = weight.vec.cL)
+
+## Weighted mean:
+cL_var_wide_wm <- cL_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMwmean") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(cL_var_wide_wm) <- cL_var_wide_wm$expl.var
+
+cL_var_wide_wm <- cL_var_wide_wm %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.cL <- which(colnames(cL_var_wide_wm) %in% mods.to.keep.cL$looprun)
+
+cL_var_imp_wm <- 
+  matrixStats::rowWeightedMeans(
+    cL_var_wide_wm[,col.index.cL], 
+    na.rm = FALSE, 
+    w = weight.vec.cL)
+```
+
+Variable importance: hS
+```{r}
+hS_var_imp <- read.csv("./biomod/hS_MasterVariableImportance.csv",
+                       check.names=FALSE)
+
+## Committee average:
+hS_var_wide_ca <- hS_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMca") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(hS_var_wide_ca) <- hS_var_wide_ca$expl.var
+
+hS_var_wide_ca <- hS_var_wide_ca %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.hS <- which(colnames(hS_var_wide_ca) %in% mods.to.keep.hS$looprun)
+
+hS_var_imp_ca <- 
+  matrixStats::rowWeightedMeans(
+    hS_var_wide_ca[,col.index.hS], 
+    na.rm = FALSE, 
+    w = weight.vec.hS)
+
+## Weighted mean:
+hS_var_wide_wm <- hS_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMwmean") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(hS_var_wide_wm) <- hS_var_wide_wm$expl.var
+
+hS_var_wide_wm <- hS_var_wide_wm %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.hS <- which(colnames(hS_var_wide_wm) %in% mods.to.keep.hS$looprun)
+
+hS_var_imp_wm <- 
+  matrixStats::rowWeightedMeans(
+    hS_var_wide_wm[,col.index.hS], 
+    na.rm = FALSE, 
+    w = weight.vec.hS)
+```
+
+Variable importance: hL
+```{r}
+hL_var_imp <- read.csv("./biomod/hL_MasterVariableImportance.csv",
+                       check.names=FALSE)
+
+## Committee average:
+hL_var_wide_ca <- hL_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMca") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(hL_var_wide_ca) <- hL_var_wide_ca$expl.var
+
+hL_var_wide_ca <- hL_var_wide_ca %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.hL <- which(colnames(hL_var_wide_ca) %in% mods.to.keep.hL$looprun)
+
+hL_var_imp_ca <- 
+  matrixStats::rowWeightedMeans(
+    hL_var_wide_ca[,col.index.hL], 
+    na.rm = FALSE, 
+    w = weight.vec.hL)
+
+## Weighted mean:
+hL_var_wide_wm <- hL_var_imp %>% 
+  dplyr::select(-seed) %>% 
+  tidyr::pivot_wider(., names_from = looprun, values_from = mean.var.imp) %>% 
+  filter(algo == "EMwmean") %>% 
+  dplyr::select(-algo) %>% 
+  as.data.frame(.)
+rownames(hL_var_wide_wm) <- hL_var_wide_wm$expl.var
+
+hL_var_wide_wm <- hL_var_wide_wm %>% dplyr::select(-expl.var) %>% as.matrix(.)
+
+col.index.hL <- which(colnames(hL_var_wide_wm) %in% mods.to.keep.hL$looprun)
+
+hL_var_imp_wm <- 
+  matrixStats::rowWeightedMeans(
+    hL_var_wide_wm[,col.index.hL], 
+    na.rm = FALSE, 
+    w = weight.vec.hL)
+```
+
+Variable importance output:
+```{r}
+## Combine:
+EMwmean_all <- 
+  cbind(hS = hS_var_imp_wm, 
+        cS = cS_var_imp_wm, 
+        hL = hL_var_imp_wm, 
+        cL = cL_var_imp_wm) %>% 
+  as.data.frame(.) %>% 
+  mutate(mean.all = rowMeans(.)) %>% 
+  arrange(-mean.all)
+
+EMca_all <- 
+  cbind(hS = hS_var_imp_ca, 
+        cS = cS_var_imp_ca, 
+        hL = hL_var_imp_ca, 
+        cL = cL_var_imp_ca) %>% 
+  as.data.frame(.) %>% 
+  mutate(mean.all = rowMeans(.)) %>% 
+  arrange(-mean.all)
+
+## Save:
+write.csv(EMwmean_all, "./biomod/Tables/EMwmean_all.csv")
+write.csv(EMca_all, "./biomod/Tables/EMca_all.csv")
+```
+
+## Predicted individual variable responses
+
+```{r}
+hS.poly <- st_read("./biomod/hS_final_prediction.shp")
+hS.env <- hS.poly %>% 
+  left_join(., st_drop_geometry(hS.points.all), by = "huc") %>% 
+  dplyr::select(-X, -Y, -hOccu, -pab, -looprun, -mean_pred)
+
+cS.poly <- st_read("./biomod/cS_final_prediction.shp")
+cS.env <- cS.poly %>% 
+  left_join(., st_drop_geometry(cS.points.all), by = "huc") %>% 
+  dplyr::select(-X, -Y, -cOccu, -pab, -looprun, -mean_pred)
+
+hL.poly <- st_read("./biomod/hL_final_prediction.shp")
+hL.env <- hL.poly %>% 
+  left_join(., st_drop_geometry(hL.points.all), by = "huc") %>% 
+  dplyr::select(-X, -Y, -hOccu, -pab, -looprun, -mean_pred)
+
+cL.poly <- st_read("./biomod/cL_final_prediction.shp")
+cL.env <- cL.poly %>% 
+  left_join(., st_drop_geometry(cL.points.all), by = "huc") %>% 
+  dplyr::select(-X, -Y, -cOccu, -pab, -looprun, -mean_pred)
+```
+
+Scale covariates:
+```{r}
+hS.sc <- st_drop_geometry(hS.env)[,c(-1,-2)] %>% scale(.,center = TRUE, scale = TRUE) %>% as.data.frame(.)
+cS.sc <- st_drop_geometry(cS.env)[,c(-1,-2)] %>% scale(.,center = TRUE, scale = TRUE) %>% as.data.frame(.)
+hL.sc <- st_drop_geometry(hL.env)[,c(-1,-2)] %>% scale(.,center = TRUE, scale = TRUE) %>% as.data.frame(.)
+cL.sc <- st_drop_geometry(cL.env)[,c(-1,-2)] %>% scale(.,center = TRUE, scale = TRUE) %>% as.data.frame(.)
+```
+
+Check for highly correlated variables:
+```{r}
+## Historical subcatchments
+hS.sc.c <- hS.sc[complete.cases(hS.sc),]
+
+corr <- cor(hS.sc.c, method = "pearson")
+# write.csv(corr, "./correlations.csv")
+corrtest <- cor.mtest(hS.sc, alternative = "two.sided", conf.level = 0.95)
+corrplot <- corrplot(corr, 
+                     type="lower", #shape of the plot itself: full, upper, lower
+                     method="color", #shape of the data: circle, square, ellipse, number, shade, color, pie 
+                     diag = FALSE,
+                     order="FPC", #how to cluster samples: AOE, hclust, FPC, alphabet, or leave blank
+                     # p.mat = corrtest$p, #which correlations to use
+                     # sig.level=0.05, #sets significance cutoff
+                     # insig="label_sig",#leaves p > 0.05 blank
+                     # addCoef.col = "black",
+                     # number.cex = 0.5,
+                     pch.col = "black",
+                     pch.cex = 0.9,
+                     tl.col="black", # text color
+                     tl.cex=.7,#text size
+                     tl.srt = 45,
+                     col = COL2(diverging = "RdYlBu"))
+
+
+hi.cor.hS <- melt(corr) %>% 
+  filter(.,value != 1.0) %>% 
+  filter(.,value >= 0.70) %>% 
+  dplyr::select(-value) %>% 
+  unique(.)
+hi.cor.hS 
+
+## Current subcatchments:
+cS.sc.c <- cS.sc[complete.cases(cS.sc),]
+
+corr <- cor(cS.sc.c, method = "pearson")
+# write.csv(corr, "./correlations.csv")
+corrtest <- cor.mtest(cS.sc, alternative = "two.sided", conf.level = 0.95)
+corrplot <- corrplot(corr, 
+                     type="lower", #shape of the plot itself: full, upper, lower
+                     method="color", #shape of the data: circle, square, ellipse, number, shade, color, pie 
+                     diag = FALSE,
+                     order="FPC", #how to cluster samples: AOE, hclust, FPC, alphabet, or leave blank
+                     # p.mat = corrtest$p, #which correlations to use
+                     # sig.level=0.05, #sets significance cutoff
+                     # insig="label_sig",#leaves p > 0.05 blank
+                     # addCoef.col = "black",
+                     # number.cex = 0.5,
+                     pch.col = "black",
+                     pch.cex = 0.9,
+                     tl.col="black", # text color
+                     tl.cex=.7,#text size
+                     tl.srt = 45,
+                     col = COL2(diverging = "RdYlBu"))
+
+
+hi.cor.cS <- melt(corr) %>% 
+  filter(.,value != 1.0) %>% 
+  filter(.,value >= 0.70) %>% 
+  dplyr::select(-value) %>% 
+  unique(.)
+hi.cor.cS 
+
+## Historical HUC12s:
+hL.sc.c <- hL.sc[complete.cases(hL.sc),]
+
+corr <- cor(hL.sc.c, method = "pearson")
+# write.csv(corr, "./correlations.csv")
+corrtest <- cor.mtest(hL.sc, alternative = "two.sided", conf.level = 0.95)
+corrplot <- corrplot(corr, 
+                     type="lower", #shape of the plot itself: full, upper, lower
+                     method="color", #shape of the data: circle, square, ellipse, number, shade, color, pie 
+                     diag = FALSE,
+                     order="FPC", #how to cluster samples: AOE, hclust, FPC, alphabet, or leave blank
+                     # p.mat = corrtest$p, #which correlations to use
+                     # sig.level=0.05, #sets significance cutoff
+                     # insig="label_sig",#leaves p > 0.05 blank
+                     # addCoef.col = "black",
+                     # number.cex = 0.5,
+                     pch.col = "black",
+                     pch.cex = 0.9,
+                     tl.col="black", # text color
+                     tl.cex=.7,#text size
+                     tl.srt = 45,
+                     col = COL2(diverging = "RdYlBu"))
+
+
+hi.cor.hL <- melt(corr) %>% 
+  filter(.,value != 1.0) %>% 
+  filter(.,value >= 0.70) %>% 
+  dplyr::select(-value) %>% 
+  unique(.)
+hi.cor.hL 
+
+## Current HUC12s:
+cL.sc.c <- cL.sc[complete.cases(cL.sc),]
+
+corr <- cor(cL.sc.c, method = "pearson")
+# write.csv(corr, "./correlations.csv")
+corrtest <- cor.mtest(cL.sc, alternative = "two.sided", conf.level = 0.95)
+corrplot <- corrplot(corr, 
+                     type="lower", #shape of the plot itself: full, upper, lower
+                     method="color", #shape of the data: circle, square, ellipse, number, shade, color, pie 
+                     diag = FALSE,
+                     order="FPC", #how to cluster samples: AOE, hclust, FPC, alphabet, or leave blank
+                     # p.mat = corrtest$p, #which correlations to use
+                     # sig.level=0.05, #sets significance cutoff
+                     # insig="label_sig",#leaves p > 0.05 blank
+                     # addCoef.col = "black",
+                     # number.cex = 0.5,
+                     pch.col = "black",
+                     pch.cex = 0.9,
+                     tl.col="black", # text color
+                     tl.cex=.7,#text size
+                     tl.srt = 45,
+                     col = COL2(diverging = "RdYlBu"))
+
+
+hi.cor.cL <- melt(corr) %>% 
+  filter(.,value != 1.0) %>% 
+  filter(.,value >= 0.70) %>% 
+  dplyr::select(-value) %>% 
+  unique(.)
+hi.cor.cL 
+
+hi.cor <- rbind(hi.cor.hS, hi.cor.cS, hi.cor.hL, hi.cor.cL) %>% unique(.)
+
+```
+
+Remove highly correlated variables `AcAp_Montane_SpruceFir`, `Glac_till_crs`, and `clay`
+```{r}
+hS.sc.drop <- hS.sc %>% dplyr::select(-AcAp_Montane_SpruceFir, -Glac_till_crs, -clay) %>% mutate(pred_occu = hS.env$pred_occu)
+cS.sc.drop <- cS.sc %>% dplyr::select(-AcAp_Montane_SpruceFir, -Glac_till_crs, -clay) %>% mutate(pred_occu = cS.env$pred_occu)
+hL.sc.drop <- hL.sc %>% dplyr::select(-AcAp_Montane_SpruceFir, -Glac_till_crs, -clay) %>% mutate(pred_occu = hL.env$pred_occu)
+cL.sc.drop <- cL.sc %>% dplyr::select(-AcAp_Montane_SpruceFir, -Glac_till_crs, -clay) %>% mutate(pred_occu = cL.env$pred_occu)
+```
+
+GLM with all variables:
+```{r}
+summary(hS.glm <- glm(pred_occu ~ ., family = binomial, data = hS.sc.drop))
+summary(cS.glm <- glm(pred_occu ~ ., family = binomial, data = cS.sc.drop))
+summary(hL.glm <- glm(pred_occu ~ ., family = binomial, data = hL.sc.drop))
+summary(cL.glm <- glm(pred_occu ~ ., family = binomial, data = cL.sc.drop))
+```
+
+```{r}
+response_column <- names(hS.env)[2]
+predictor_columns <- names(st_drop_geometry(hS.env))[c(-1,-2)]
+modnames <- c("hS", "cS", "hL", "cL")
+summary <- c()
+
+em_glm <- as.data.frame(matrix(NA, nrow = length(predictor_columns), ncol = 6))
+colnames(em_glm) <- c("Variable", modnames, "sum")
+
+for (i in 1:length(predictor_columns)) {
+  model <- as.formula(paste(response_column, "~", predictor_columns[i]))
+  summary.hS <- summary(glm(model, 
+                  family = binomial, 
+                  data = hS.env))$coefficients[predictor_columns[i],"z value"]
+  summary.cS <- summary(glm(model, 
+                  family = binomial, 
+                  data = cS.env))$coefficients[predictor_columns[i],"z value"]
+  summary.hL <- summary(glm(model, 
+                  family = binomial, 
+                  data = hL.env))$coefficients[predictor_columns[i],"z value"]
+  summary.cL <- summary(glm(model, 
+                  family = binomial, 
+                  data = cL.env))$coefficients[predictor_columns[i],"z value"]
+  em_glm[i,1] <- predictor_columns[i]
+  em_glm[i,"hS"] <- summary.hS
+  em_glm[i,"cS"] <- summary.cS
+  em_glm[i,"hL"] <- summary.hL
+  em_glm[i,"cL"] <- summary.cL
+  em_glm[i,"sum"] <- sum(abs(summary.hS), abs(summary.cS), abs(summary.hL), abs(summary.cL))
+}
+
+em_glm <- em_glm %>% arrange(sum) %>% dplyr::select(-sum)
+write.csv(em_glm, "./biomod/Tables/ensemble_var_imp_glm.csv", row.names = FALSE)
+
+order <- em_glm$Variable
+em_glm_melt <- melt(em_glm, id.vars = 1) %>% dplyr::rename(., EnsembleModel = variable)
+
+## Plot with absolute z-scores:
+g <- ggplot(em_glm_melt, aes(x = Variable, y = abs(value))) + 
+      geom_bar(aes(fill = EnsembleModel), stat = "identity") +
+      scale_fill_viridis_d(begin = 0.15, end = 0.85, option = "G") +
+      coord_flip() +
+      ylab("Absolute z-value (stacked)") +
+      scale_x_discrete(limit = c(paste(order, sep = ","))) +
+      theme_minimal() +
+      theme(axis.text = element_text(size=12), axis.title = element_text(size = 12, face = "bold"))
+ggsave("./biomod/Figures/Variable_importance.tif", g, width = 8, dpi = 600, bg = "white")
+
+g2 <- ggplot(em_glm_melt, aes(x = Variable, y = value)) + 
+      geom_bar(aes(fill = EnsembleModel), stat = "identity") +
+      scale_fill_viridis_d(begin = 0.15, end = 0.85, option = "G") +
+      coord_flip() +
+      ylab("Z-value (stacked)") +
+      scale_x_discrete(limit = c(paste(order, sep = ","))) +
+      theme_minimal() +
+      theme(axis.text = element_text(size=12), axis.title = element_text(size = 12, face = "bold"))
+ggsave("./biomod/Figures/Variable_importance2.tif", g2, width = 9, dpi = 600, bg = "white")
+```
+
+
+```{r}
+# plot(y = hS.env$pred_occu, x = hS.env$elev)
+# model <- glm(pred_occu ~ elev, family = binomial, data = hS.env)
+# predicted_scores <- predict(model)
+#                             # , newdata = data.frame(elev = seq(from=0, to=1000)))
+# 
+# # Plot the data points and the predicted scores
+# plot(
+#   hS.env$elev, 
+#   hS.env$pred_occu)
+# lines(seq(0, 1000,length.out = 1000), 
+#       predicted_scores, col = "red"
+#       )
+# plot(predicted_scores)
+# 
+# plot(log_model)
+
+```
+```{r}
+summary(glm(pred_occu ~ Glac_out_crs, family = binomial, data = hL.env))
+viridis(n=4, begin=0.2, end =0.8, option = "B")
+```
+
+# Maps
+
+Small hucs:
+```{r}
+hucS_pa_h <- st_read("./biomod/hucS_pa_hist.shp")
+hucS_pa_h[hucS_pa_h$hOccu == -999,]$hOccu <- NA
+hucS_pa_c <- st_read("./biomod/hucS_pa_curr.shp")
+hucS_pa_c[hucS_pa_c$cOccu == -999,]$cOccu <- NA
+
+hucS_pa_all <- hucS_pa_h %>% st_join(., hucS_pa_c, join = st_equals) %>% mutate(period = NA)
+
+hucS_pa_all[which(!is.na(hucS_pa_all$hOccu) & hucS_pa_all$hOccu == 1 & !is.na(hucS_pa_all$cOccu) & hucS_pa_all$cOccu == 1),]$period <- "both"
+
+hucS_pa_all[which(!is.na(hucS_pa_all$hOccu) & hucS_pa_all$hOccu == 1 & is.na(hucS_pa_all$cOccu) | hucS_pa_all$cOccu == 0),]$period <- "historical"
+
+hucS_pa_all[which(is.na(hucS_pa_all$hOccu) & !is.na(hucS_pa_all$cOccu) & hucS_pa_all$cOccu == 1),]$period <- "current"
+
+hucS_pa_all[which(is.na(hucS_pa_all$hOccu) & is.na(hucS_pa_all$cOccu) | hucS_pa_all$cOccu == 0),]$period <- "neither, unknown status"
+
+plot(hucS_pa_all["period"])
+
+st_write(hucS_pa_all, "./biomod/hucS_pa_all.shp", append = FALSE)
+```
+
+HUC12s:
+```{r}
+huc12_pa_h <- st_read("./biomod/huc12_pa_hist.shp")
+huc12_pa_h[huc12_pa_h$hOccu == -999,]$hOccu <- NA
+
+huc12_pa_c <- st_read("./biomod/huc12_pa_curr.shp")
+huc12_pa_c[huc12_pa_c$cOccu == -999,]$cOccu <- NA
+plot(huc12_pa_h["hOccu"])
+huc12_pa_all <- huc12_pa_h %>% st_join(., huc12_pa_c, join = st_equals) %>% mutate(period = NA)
+
+huc12_pa_all[which(!is.na(huc12_pa_all$hOccu) & huc12_pa_all$hOccu == 1 & !is.na(huc12_pa_all$cOccu) & huc12_pa_all$cOccu == 1),]$period <- "both"
+
+huc12_pa_all[which(!is.na(huc12_pa_all$hOccu) & huc12_pa_all$hOccu == 1 & (is.na(huc12_pa_all$cOccu) | huc12_pa_all$cOccu == 0)),]$period <- "historical"
+
+huc12_pa_all[which(is.na(huc12_pa_all$hOccu) & !is.na(huc12_pa_all$cOccu) & huc12_pa_all$cOccu == 1),]$period <- "current"
+
+huc12_pa_all[which(is.na(huc12_pa_all$hOccu) & (is.na(huc12_pa_all$cOccu) | huc12_pa_all$cOccu == 0)),]$period <- "neither, unknown status"
+
+plot(huc12_pa_all["period"])
+
+st_write(huc12_pa_all, "./biomod/huc12_pa_all.shp", append = FALSE)
+```
+
+
+# Old
+
+Summarize variable importance (weighted mean):
+```{r}
+# ## Current, small hucs:
+# col.index.cS <- which(colnames(cS_var_wide) %in% mods.to.keep.cS$looprun)
+# cS_var_mat <- 
+#   cS_var_wide %>% 
+#   group_by(expl.var, algo)
+# cS_var_wmean <- matrixStats::rowWeightedMeans(cS_var_mat[,col.index.cS], 
+#                                 na.rm = FALSE, 
+#                                 w = weight.vec.cS)
+# 
+# 
+# cS_var_EMwmean <- 
+#   cS_var_sum %>% 
+#   filter(algo == "EMwmean") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(cS = MEAN)
+# 
+# cS_var_EMca <- 
+#   cS_var_sum %>% 
+#   filter(algo == "EMca") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(cS = MEAN)
+# 
+# ## Current, huc12:
+# cL_var_sum <- 
+#   cL_var_imp %>% 
+#   # filter(seed != cL.remove.seeds) %>% 
+#   group_by(expl.var, algo) %>% 
+#   summarise(MEAN = mean(mean.var.imp), .groups = "drop")
+# 
+# cL_var_EMwmean <- 
+#   cL_var_sum %>% 
+#   filter(algo == "EMwmean") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(cL = MEAN)
+# 
+# cL_var_EMca <- 
+#   cL_var_sum %>% 
+#   filter(algo == "EMca") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(cL = MEAN)
+# 
+# ## Historical, small hucs:
+# hS_var_sum <- 
+#   hS_var_imp %>% 
+#   # filter(seed != hS.remove.seeds) %>% 
+#   group_by(expl.var, algo) %>% 
+#   summarise(MEAN = mean(mean.var.imp), .groups = "drop")
+# 
+# hS_var_EMwmean <- 
+#   hS_var_sum %>% 
+#   filter(algo == "EMwmean") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(hS = MEAN)
+# 
+# hS_var_EMca <- 
+#   hS_var_sum %>% 
+#   filter(algo == "EMca") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(hS = MEAN)
+# 
+# ## Historical, huc12:
+# hL_var_sum <- 
+#   hL_var_imp %>% 
+#   filter(seed != hL.remove.seeds) %>% 
+#   group_by(expl.var, algo) %>% 
+#   summarise(MEAN = mean(mean.var.imp), .groups = "drop")
+# 
+# hL_var_EMwmean <- 
+#   hL_var_sum %>% 
+#   filter(algo == "EMwmean") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(hL = MEAN)
+# 
+# hL_var_EMca <- 
+#   hL_var_sum %>% 
+#   filter(algo == "EMca") %>% 
+#   dplyr::select(-algo) %>% 
+#   arrange(-MEAN) %>% 
+#   dplyr::rename(hL = MEAN)
+```
+```{r}
+# if (over_thresh$total == 1) {
+#     
+#     ## Get name of the model that has the TSS over 0.6 
+#     modelsel1 <- 
+#       ind_models %>% 
+#       get_evaluations(.) %>% 
+#       filter(metric.eval == "TSS") %>% 
+#       filter(validation > select.thresh)
+#     modelsel <- modelsel1$full.name
+#     
+# #     ## Use str_extract with regex to find the run number:
+# #     require(stringr)
+# #     run <- as.numeric(str_extract(modelsel, "(?<=RUN)\\d+"))
+# #     
+# #     ## Use str_extract with regex to find the model type:
+# #     modtype <- str_extract(modelsel, "[A-Z]+$")
+# # 
+# #     ## Extract the names of the models:
+# #     model_names <- get_built_models(ind_models)
+# # 
+# #     ## Filter the models to include only those ending with "GBM"
+# #     filtered_models1 <- model_names[grepl(modtype, model_names)]
+# #     filtered_models <- filtered_models1[grepl(paste0("RUN",run), filtered_models1)]
+# # 
+# # # Print filtered model names to verify
+# # print(filtered_model_names)
+# 
+#     ## Subset the original BIOMOD.models.out object to just the selected model:
+#     filtered_ind_mod <- ind_models
+#     filtered_ind_mod@models.computed <- modelsel
+#     
+#     
+#     # EM[[looprun]] <- filtered_ind_mod
+#       
+#       # BIOMOD_LoadModels(
+#       # bm.out = ind_models, 
+#       # full.name = NULL,
+#       # PA = NULL,
+#       # run = paste0("RUN", run),
+#       # algo = paste(modtype),
+#       # merged.by.PA = NULL,
+#       # merged.by.run = NULL,
+#       # merged.by.algo = NULL,
+#       # filtered.by = 'TSS')
+#     
+#     
+#     # EM_model <- EM[[looprun]]
+#     
+#     ind_mod_score <- get_evaluations(ind_models, full.name = paste(modelsel))
+#     colnames(EM_scores) <- c("full.name", "merged.by.PA", "merged.by.run", "merged.by.algo", "filtered.by", "algo", "metric.eval", "cutoff", "sensitivity", "specificity", "calibration", "validation", "evaluation", "nmodels")
+#     new_em_scores <- cbind(get_evaluations(ind_models, full.name = paste(modelsel), PA = NULL, run = NULL, algo = NULL), nmodels = over_thresh$total) %>% filter(full.name == modelsel)
+#     EM_scores <- rbind(EM_scores, new_em_scores)
+#     
+# }
+#     if (over_thresh$total > 1) {
+#     # if (class == "BIOMOD.models.out") {
+#     IM_forecast <- 
+#       BIOMOD_Projection(
+#         bm.mod = EM,
+#         proj.name = proj.name,
+#         new.env = format_eval@data.env.var,
+#         new.env.xy = format_eval@coord,
+#         models.chosen = 'all',
+#         metric.binary = 'TSS',
+#         nb.cpu = nb.cpu,
+#         seed.val = seeds[looprun])
+#     
+#     predict <- get_predictions(IM_forecast)
+#     predicted <- 
+#       predict %>% 
+#       filter(filtered.by == "TSS") %>% 
+#       filter(algo == "EMwmean") %>% 
+#       dplyr::select(pred) %>% 
+#       unlist(.) %>% 
+#       unname(.)
+#     
+#     true_occu <- format_eval@data.species # actual occupancy data
+#     
+#     ## Check ROC/AUC and TSS:
+#     require(pROC) # help from ChatGPT
+#     roc_curve <- roc(response=true_occu, predicted)
+#     # plot(roc_curve)
+#     roc_coords <- pROC::coords(roc=roc_curve, x="best")
+#     
+#     if (length(roc_coords$threshold) > 1) {
+#       tss_value.j <- c()
+#       for (j in 1:length(roc_coords$threshold)) {
+#         tss_threshold <- roc_coords$threshold[j] %>% as.numeric(.)
+#         TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#         TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#         tss_value.j[j] <- TPR + TNR - 1
+#         tss.value.j <- as.data.frame(cbind(value = tss_value.j, index = 1:length(tss_value.j)))
+#       }
+#       tss.j <- tss.value.j[which(tss.value.j$value == max(tss.value.j$value)),]$index
+#       tss_threshold <- roc_coords$threshold[tss.j] %>% as.numeric(.)
+#       TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#       TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#       tss_value <- TPR + TNR - 1
+#       
+#       new_em_evals[i,1] <- seeds[i]
+#       new_em_evals[i,2] <- auc(roc_curve)
+#       new_em_evals[i,3] <- tss_value
+#       new_em_evals[i,4] <- roc_coords$sensitivity[tss.j]
+#       new_em_evals[i,5] <- roc_coords$specificity[tss.j]
+#       new_em_evals[i,6] <- tss_threshold
+#     }
+#     if (length(roc_coords$threshold) == 1) {
+#       tss_threshold <- roc_coords$threshold %>% as.numeric(.)
+#       TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#       TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#       tss_value <- TPR + TNR - 1
+#       
+#       new_em_evals[i,1] <- seeds[i]
+#       new_em_evals[i,2] <- auc(roc_curve)
+#       new_em_evals[i,3] <- tss_value
+#       new_em_evals[i,4] <- roc_coords$sensitivity
+#       new_em_evals[i,5] <- roc_coords$specificity
+#       new_em_evals[i,6] <- tss_threshold
+#     }
+#   }
+#     
+#     if (over_thresh$total == 1) {  
+#       IM_forecast <- BIOMOD_Projection(
+#         bm.mod = EM_model, 
+#         proj.name = proj.name, 
+#         new.env = format_eval@data.env.var,
+#         new.env.xy = format_eval@coord,
+#         models.chosen = 'all',
+#         metric.binary = 'TSS',
+#         nb.cpu = nb.cpu)
+#       
+#       predict <- get_predictions(IM_forecast)
+#       predicted <- 
+#         predict %>% 
+#         filter(filtered.by == "TSS") %>% 
+#         filter(algo == "EMwmean") %>% 
+#         dplyr::select(pred) %>% 
+#         unlist(.) %>% 
+#         unname(.)
+#     
+#       true_occu <- format_eval@data.species # actual occupancy data
+#     
+#       ## Check ROC/AUC and TSS:
+#       require(pROC) # help from ChatGPT
+#       roc_curve <- roc(response=true_occu, predicted)
+#       # plot(roc_curve)
+#       roc_coords <- pROC::coords(roc=roc_curve, x="best")
+#     
+#       if (length(roc_coords$threshold) > 1) {
+#         tss_value.j <- c()
+#         for (j in 1:length(roc_coords$threshold)) {
+#           tss_threshold <- roc_coords$threshold[j] %>% as.numeric(.)
+#           TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#           TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#           tss_value.j[j] <- TPR + TNR - 1
+#           tss.value.j <- as.data.frame(cbind(value = tss_value.j, index = 1:length(tss_value.j)))
+#         }
+#         tss.j <- tss.value.j[which(tss.value.j$value == max(tss.value.j$value)),]$index
+#         tss_threshold <- roc_coords$threshold[tss.j] %>% as.numeric(.)
+#         TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#         TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#         tss_value <- TPR + TNR - 1
+#         
+#         new_em_evals[i,1] <- seeds[i]
+#         new_em_evals[i,2] <- auc(roc_curve)
+#         new_em_evals[i,3] <- tss_value
+#         new_em_evals[i,4] <- roc_coords$sensitivity[tss.j]
+#         new_em_evals[i,5] <- roc_coords$specificity[tss.j]
+#         new_em_evals[i,6] <- tss_threshold
+#       }
+#       if (length(roc_coords$threshold) == 1) {
+#         tss_threshold <- roc_coords$threshold %>% as.numeric(.)
+#         TPR <- sum(true_occu == 1 & predicted >= tss_threshold) / sum(predicted >= tss_threshold) # true positives/all positives
+#         TNR <- sum(true_occu == 0 & predicted < tss_threshold) / sum(predicted < tss_threshold) # true negatives/all negatives
+#         tss_value <- TPR + TNR - 1
+#         
+#         new_em_evals[i,1] <- seeds[i]
+#         new_em_evals[i,2] <- auc(roc_curve)
+#         new_em_evals[i,3] <- tss_value
+#         new_em_evals[i,4] <- roc_coords$sensitivity
+#         new_em_evals[i,5] <- roc_coords$specificity
+#         new_em_evals[i,6] <- tss_threshold
+#       }
+#     }
+```
+

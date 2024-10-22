@@ -1,0 +1,579 @@
+---
+title: "Aggregating historical and present Bridle Shiner records at the HUC12 scale"
+author: "Lara Katz"
+date: "2024-04-18"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(lubridate)
+library(oce) # long/lat to UTM
+```
+
+# Get centroids
+
+```{r}
+# polys <- vect("./RiverCentroidPolysNH.shp")
+# polys.p <- project(polys, "epsg:4326")
+# 
+# centers <- centroids(polys.p, inside = TRUE)
+# plot(centers)
+# writeVector(centers, "RiverCentroidPointsNH.shp")
+# centerstab <- as.data.frame(geom(centers)[,3:4])
+# centerstab$site <- centers$GNIS_Name
+# write.csv(centerstab, "RiverCentroidsNH.csv")
+```
+
+# Historical point data
+
+## Maine 
+
+```{r}
+hist.me1 <- read.csv("./BDSHistoricalRecords.csv", header = T)
+hist.me1[hist.me1$Year_Est == "Unknown",]$Year_Est <- -9999
+hist.me1[hist.me1$YearSamp == "Unknown",]$YearSamp <- -9999
+hist.me1$Year_Est <- as.integer(hist.me1$Year_Est)
+hist.me1$YearSamp <- as.integer(hist.me1$YearSamp)
+hist.me1$Year <- 1
+for (i in 1:nrow(hist.me1)){
+hist.me1[i,"Year"] <- min(c(hist.me1[i,"Year_Est"], hist.me1[i,"YearSamp"]))
+}
+hist.me1$Year <- as.integer(hist.me1$Year)
+
+hist.me1 <- hist.me1[-48,]
+# hist.me1[which(hist.me1$Year >= 2011),]$Site_Name
+```
+
+
+```{r}
+hist.me <- hist.me1[hist.me1$Year < 2011,]
+hist.me$Date <- lubridate::mdy(hist.me$Date)
+mdy(hist.me$Date)
+hist.me <- hist.me %>% dplyr::select(-Year_Est,-YearSamp,-TopUTMX,-TopUTMY,-BtmUTMX,-BtmUTMY,-LengthSection,-AveWidth) %>% mutate(., x=East_new, y=North_new) %>% select(-East_new,-North_new)
+# hist.me[hist.me$cOccu == -9999,]$cOccu <- NA
+hist.me <- hist.me[,c(1,16,2,3,4,17,18,5:8,10:15)] %>% dplyr::select(-cOccu,-CStatus)
+```
+
+## New Hampshire
+
+```{r}
+all.nh <- read.csv("./NH_BS_data.csv", header = T)
+all.nh$Date <- lubridate::ymd(all.nh$Date)
+all.nh[all.nh$Site_Name == 0,]$Site_Name <- NA
+all.nh$Year <- as.integer(all.nh$Year)
+```
+
+
+```{r}
+hist.nh1 <- all.nh[all.nh$Year < 2009,]
+unique(hist.nh1$Project)
+unique(hist.nh1$Water_Body)
+unique(hist.nh1$Site_Name)
+hist.nh1[!is.na(hist.nh1$Site_Name) & hist.nh1$Site_Name == "Blacky's Cove",]$Site_Name <- "Blackey's Cove"
+hist.nh1[!is.na(hist.nh1$Site_Name) & hist.nh1$Site_Name == "",]$Site_Name <- NA
+```
+```{r}
+colnames(hist.nh1)
+hist.nh <- hist.nh1 %>% 
+  select(ACT_ID,Date,Site_Name,Year,Water_Body,Lat_Start,Long_Start,Survey_location_description,Survey_comments,BS) %>% mutate(.,Date = Date, Year = Year, Water_Body=Water_Body,Site_Name=Site_Name,Site_code=ACT_ID,SiteHist=Survey_comments,x=Long_Start,y=Lat_Start,BS_Pres=BS,PointType = Survey_location_description) %>% select(-ACT_ID,-Lat_Start,-Long_Start)
+head(hist.nh)
+```
+
+
+```{r}
+hist.nh[hist.nh$BS_Pres == "P",]$BS_Pres <- "Historical"
+hist.nh$HStatus <- NA
+hist.nh$hOccu <- NA
+
+hist.nh[hist.nh$BS_Pres == "Historical",]$HStatus <- "Present"
+
+hist.nh[hist.nh$BS_Pres == "Historical",]$hOccu <- 1
+hist.nh <- hist.nh[!is.na(hist.nh$x),]
+utm <- lonlat2utm(hist.nh$x, hist.nh$y, zone = 19, km= FALSE)
+
+hist.nh$x <- utm$easting
+hist.nh$y <- utm$northing
+hist.nh$Source <- "New Hampshire Fish & Game"
+hist.nh$WBType <- NA
+hist.nh$State <- "NH"
+hist.nh[which(grepl("Pond", hist.nh$Water_Body)),]$WBType <- "LakePond"
+hist.nh[which(grepl("Lake", hist.nh$Water_Body)),]$WBType <- "LakePond"
+hist.nh[which(grepl("River", hist.nh$Water_Body)),]$WBType <- "StreamRiver"
+hist.nh[which(grepl("Brook", hist.nh$Water_Body)),]$WBType <- "StreamRiver"
+hist.nh[which(grepl("stream", hist.nh$Water_Body)),]$WBType <- "StreamRiver"
+any(is.na(hist.nh$WBType))
+colnames(hist.nh)
+hist.nh <- hist.nh[,c(16,3,1,17,4,10,11,18,2,8,9,12,14,15,13)] # same order as Maine data
+```
+
+## Combined
+
+```{r}
+hist.all <- rbind(hist.me,hist.nh)
+hist.all[hist.all$x == -9999,] <- NA # remove points with no coordinates
+hist.all <- hist.all[!is.na(hist.all$x),]
+# hist.all <- transform(hist.all,
+#                       WBType = as.factor(WBType),
+#                       State = as.factor(State),
+#                       BS_Pres = as.factor(BS_Pres),
+#                       HStatus = as.factor(HStatus))
+
+hist.all[which(grepl("19380616-Harrington",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("19460618-Harrington",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("1947-Canobie Lake",hist.all$Site_code)),]$HStatus <- "Present in waterbody"
+hist.all[which(grepl("1947-Lower Suncook Lake",hist.all$Site_code)),]$HStatus <- "Present in waterbody"
+hist.all[which(grepl("1947-Shadow Lake",hist.all$Site_code)),]$HStatus <- "Present in waterbody"
+hist.all[which(grepl("1947-Wheelwright Pond",hist.all$Site_code)),]$HStatus <- "Present in waterbody"
+hist.all[which(grepl("1947-Winnisquam Lake",hist.all$Site_code)),]$HStatus <- "Present in waterbody"
+hist.all[which(grepl("1947-Pleasant Lake",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("Fish Cove",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("Mad River",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("Piscataquog River",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("1985",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("1986",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("1987",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("1998",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("2000",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("2001",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("2003",hist.all$Site_code)),]$HStatus <- "Present in vicinity of coordinates"
+hist.all[which(grepl("19460618-Harrington",hist.all$Site_code)),]$Source <- "Harrington 1947: The Early Life History of the Bridled Shiner"
+hist.all[which(grepl("19380616-Harrington",hist.all$Site_code)),]$Source <- "Harrington 1948: The Life Cycle and Fertility of the Bridled Shiner"
+hist.all[!is.na(hist.all$PointType) & hist.all$PointType == 0,]$PointType <- NA
+hist.all[!is.na(hist.all$SiteHist) & hist.all$SiteHist == 0,]$SiteHist <- "No survey comments"
+hist.all[!is.na(hist.all$SiteHist) & hist.all$SiteHist == "",]$SiteHist <- "No survey comments"
+# hist.all[is.na(hist.all$SiteHist),]$SiteHist <- "No survey comments"
+# hist.all[is.na(hist.all$Year),]$Year <- -9999
+
+
+hist.all <- hist.all[hist.all$Water_Body != "Warner River",] # remove Warner River location estimate
+hist.all <- hist.all[is.na(hist.all$Site_Name) | hist.all$Site_Name != "Downstream of Suncook Lakes",]
+
+
+
+hist.all[is.na(hist.all$PointType),]$PointType <- "GPS survey coordinates"
+hist.all[hist.all$PointType == "Survey coordinates",]$PointType <- "GPS survey coordinates"
+hist.all[!is.na(hist.all$Site_Name) & hist.all$Site_Name == "Mill Pond",]$PointType <- "Point in approximate center of impoundment: exact location unknown"
+hist.all[!is.na(hist.all$Site_Name) & hist.all$Site_Name == "Channel between the Suncook Ponds",]$PointType <- "Point in approximate center of channel: exact location unknown"
+hist.all$PointType <- as.factor(hist.all$PointType)
+hist.all <- hist.all[order(hist.all$Date),]
+# levels(hist.all$PointType)
+summary(hist.all)
+# colnames(hist.all)
+```
+
+### Save outputs
+
+```{r warning=FALSE}
+write.csv(hist.all, "./HistoricalBridleShinerPoints.csv")
+hist <- st_as_sf(hist.all, coords=c("x","y"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+write_sf(hist,"./HistoricalBridleShinerPoints.shp",overwrite=TRUE)
+```
+
+
+# Current point data
+
+## Maine
+
+```{r}
+curr.me1 <- read.csv("./BDS_all_points_current.csv", header = T)
+
+curr.me1 <- curr.me1 %>% filter(BDS_PA != -9999) %>% filter(Sample != "Control")
+curr.me1[curr.me1$WaterBody == "\"Robert's Ridge\" brook",]$WaterBody <- "Unnamed brook" 
+curr.me1[curr.me1$WaterBody == "Canco Woods brook",]$WaterBody <- "Unnamed brook"
+curr.me1[curr.me1$WaterBody == "Watchic Brook",]$WaterBody <- "Watchic Pond outlet brook"
+curr.me1[curr.me1$WaterBody == "\"Watchic Brook\"",]$WaterBody <- "Watchic Pond outlet brook"
+curr.me1[curr.me1$WaterBody == "Great Works River/Bauneg Beg Pond",]$WaterBody <- "Bauneg Beg Pond"
+curr.me1[which(grepl("Boom Rd",curr.me1$WaterBody)),]$WaterBody <- "Unnamed brook"
+curr.me1[curr.me1$WaterBody == "Brown's Brook",]$WaterBody <- "Browns Brook"
+curr.me1[curr.me1$SiteName == "PRESUM",]$SiteName <- "PRESUM-01" 
+curr.me1[curr.me1$SiteName == "TRAFPD" & curr.me1$Subsite == "A",]$SiteName <- "TRAFPD-01" 
+curr.me1[curr.me1$SiteName == "TRAFPD" & curr.me1$Subsite == "B",]$SiteName <- "TRAFPD-02"
+
+curr.me1$WaterBody <- as.factor(curr.me1$WaterBody)
+curr.me1$SiteName <- as.factor(curr.me1$SiteName)
+levels(curr.me1$SiteName)
+curr.me1$BDS_PA <- as.integer(curr.me1$BDS_PA)
+curr.me1$PointGroup <- curr.me1$SiteName # placeholder
+```
+
+
+```{r warning=FALSE}
+curr.me2 <- st_as_sf(curr.me1, coords=c("Easting","Northing"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+
+write_sf(curr.me2,"./CurrentPointsUngrouped.shp", overwrite =T)
+```
+
+```{r}
+curr.gr1 <- st_read("./CurrentPointsGrouped.shp")
+curr.gr1$PontGrp <- as.factor(curr.gr1$PontGrp)
+# curr.gr1$WatrBdy <- as.factor(curr.gr1$WatrBdy)
+curr.me.join <- curr.me1 %>% select(SiteName,Date) %>% arrange(as_date(mdy(Date)))
+
+curr.gr2 <- st_drop_geometry(curr.gr1) %>% 
+  select(PontGrp,SiteNam,WatrBdy,Easting,Northng,BDS_PA,SmplngN) %>% mutate(PointGroup = PontGrp, SiteName = SiteNam, WaterBody = WatrBdy, Northing = Northng,SiteHist=SmplngN) %>% select(-PontGrp,-SiteNam,-WatrBdy,-Northng,-SmplngN) %>% left_join(.,curr.me.join,by="SiteName",multiple="first")
+curr.gr2[curr.gr2$SiteName == "GWORKB",]$WaterBody = "Bauneg Beg Pond"
+curr.gr2[curr.gr2$SiteName == "SACONO-02",]$WaterBody = "Saco River impoundment"
+curr.gr2[curr.gr2$SiteName == "SACONO-03",]$WaterBody = "Saco River impoundment"
+curr.gr2[curr.gr2$SiteName == "HIGHLK-03",]$WaterBody = "Highland Lake outlet (Stevens Brook)"
+curr.gr2[curr.gr2$PointGroup == "RANGE-01-02",]$WaterBody = "Middle Range Pond inlet (unnamed pond)"
+curr.meanpts <- curr.gr2 %>% group_by(PointGroup) %>% arrange(as_date(mdy(Date))) %>% 
+  summarise(SiteName=first(SiteName),
+            WaterBody = first(WaterBody),
+            Mean.x = mean(Easting),
+            Mean.y = mean(Northing),
+            PA = max(BDS_PA),
+            Date=min(as_date(mdy(Date))), # earliest date surveyed
+            .groups = 'drop')
+
+curr.meanpts.sf <- st_as_sf(curr.meanpts, coords=c("Mean.x","Mean.y"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+write_sf(curr.meanpts.sf,"./CurrentMeanPointsME.shp", overwrite = T)
+```
+
+## New Hampshire
+
+```{r}
+curr.nh2 <- all.nh[all.nh$Year >= 2009,]
+
+
+unique(curr.nh2[order(curr.nh2$Water_Body),]$Water_Body)
+curr.nh2[!is.na(curr.nh2$Water_Body) & curr.nh2$Water_Body == "Lake Winnipesaukee",]$Water_Body <- "Winnipesaukee Lake"
+curr.nh2[curr.nh2$Water_Body == "Harper Brook  ",]$Water_Body <- "Harper Brook"
+
+unique(curr.nh2[order(curr.nh2$Site_Name),]$Site_Name)
+curr.nh2[!is.na(curr.nh2$Site_Name) & curr.nh2$Site_Name == "Blackeys Cove",]$Site_Name <- "Blackey's Cove"
+curr.nh2[!is.na(curr.nh2$Site_Name) & curr.nh2$Site_Name == "Greens Basin",]$Site_Name <- "Green's Basin"
+curr.nh2[!is.na(curr.nh2$Site_Name) & curr.nh2$Site_Name == "Lees Mills YOY Bass",]$Site_Name <- "Lees Mills"
+curr.nh2[!is.na(curr.nh2$Site_Name) & curr.nh2$Site_Name == "",]$Site_Name <- NA
+```
+
+
+```{r}
+# colnames(curr.nh2)
+curr.nh1 <- curr.nh2 %>% 
+  select(ACT_ID,Date,Site_Name,Year,Water_Body,Lat_Start,Long_Start,Survey_location_description,Survey_comments,BS) %>% mutate(.,Date = Date, Year = Year, Water_Body=Water_Body,Site_Name=Site_Name,Site_code=ACT_ID,SiteHist=Survey_comments,x=Long_Start,y=Lat_Start,BS_Pres=BS,PointType = "GPS survey coordinates") %>% select(-ACT_ID,-Lat_Start,-Long_Start)
+head(curr.nh1)
+```
+
+```{r}
+curr.nh1[curr.nh1$BS_Pres == "P",]$BS_Pres <- "Current"
+curr.nh1[curr.nh1$BS_Pres == "A",]$BS_Pres <- "Absent"
+curr.nh1$CStatus <- NA
+curr.nh1$cOccu <- NA
+
+curr.nh1[curr.nh1$BS_Pres == "Current",]$CStatus <- "Present"
+curr.nh1[curr.nh1$BS_Pres == "Absent",]$CStatus <- "Absent"
+curr.nh1[curr.nh1$BS_Pres == "Current",]$cOccu <- 1
+curr.nh1[curr.nh1$BS_Pres == "Absent",]$cOccu <- 0
+
+
+curr.nh1 <- curr.nh1[!is.na(curr.nh1$x),]
+utm <- lonlat2utm(curr.nh1$x, curr.nh1$y, zone = 19, km= FALSE)
+
+curr.nh1$x <- utm$easting
+curr.nh1$y <- utm$northing
+curr.nh1$Source <- "New Hampshire Fish & Game"
+curr.nh1$WBType <- NA
+curr.nh1$State <- "NH"
+curr.nh1[which(grepl("Pond", curr.nh1$Water_Body)),]$WBType <- "LakePond"
+curr.nh1[which(grepl("pond", curr.nh1$Water_Body)),]$WBType <- "LakePond"
+curr.nh1[which(grepl("Lake", curr.nh1$Water_Body)),]$WBType <- "LakePond"
+curr.nh1[which(grepl("River", curr.nh1$Water_Body)),]$WBType <- "StreamRiver"
+curr.nh1[which(grepl("Brook", curr.nh1$Water_Body)),]$WBType <- "StreamRiver"
+curr.nh1[which(grepl("stream", curr.nh1$Water_Body)),]$WBType <- "StreamRiver"
+any(is.na(curr.nh1$WBType))
+curr.nh1 <- curr.nh1[,c(16,3,1,17,4,10,11,18,2,8,9,12,14,15,13)]
+```
+
+```{r}
+curr.nh1[!is.na(curr.nh1$Site_Name) & curr.nh1$Site_Name == "Mill Pond",]$CStatus <- "Presumed extirpated"
+curr.nh1[curr.nh1$Water_Body == "Canobie Lake",]$CStatus <- "Extirpated"
+curr.nh1[which(grepl("UNK-Lower Suncook Lake",curr.nh1$Site_code)),]$CStatus <- "Presumed extirpated"
+curr.nh1[which(grepl("UNK-Pleasant Lake",curr.nh1$Site_code)),]$CStatus <- "Extirpated"
+curr.nh1[curr.nh1$Water_Body == "Shadow Lake",]$CStatus <- "Extirpated"
+curr.nh1[curr.nh1$Water_Body == "Wheelwright Pond",]$CStatus <- "Presumed extirpated"
+curr.nh1[curr.nh1$Water_Body == "Winnisquam Lake",]$CStatus <- "Extirpated"
+curr.nh1[curr.nh1$Water_Body == "Heads Pond",]$CStatus <- "Extirpated"
+curr.nh1[!is.na(curr.nh1$Site_Name) & curr.nh1$Site_Name == "Bunker Pond",]$CStatus <- "Extirpated"
+
+curr.nh1[curr.nh1$SiteHist == "2015 Fish Survey Presence Absence Data",]$PointType <- "Digitized from NH Fish survey map (StoryMap)"
+
+curr.nh1[curr.nh1$Year == 9999 & is.na(curr.nh1$Site_Name),]$PointType <- "Center of waterbody: no precise location known"
+
+curr.nh1[!is.na(curr.nh1$Site_Name) & curr.nh1$Site_Name == "Fish Cove",]$PointType <- "Digitized coordinates: northern end of cove"
+
+curr.nh1[!is.na(curr.nh1$Site_Name) & curr.nh1$Site_Name == "Bunker Pond",]$PointType <- "Digitized coordinates from 1992 aerial imagery (Google Earth)"
+
+curr.nh1[!is.na(curr.nh1$Site_Name) & curr.nh1$Site_Name == "Mill Pond",]$PointType <- "Point in approximate center of impoundment: exact location unknown"
+
+curr.nh1 <- transform(curr.nh1,
+                      WBType = as.factor(WBType),
+                      BS_Pres = as.factor(BS_Pres),
+                      CStatus = as.factor(CStatus))
+
+curr.nh1$PointGroup <- curr.nh1$Site_code
+curr.nh <- st_as_sf(curr.nh1, coords=c("x","y"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+
+# write_sf(curr.nh,"./CurrentPointsUngroupedNH.shp", overwrite =T)
+```
+
+```{r}
+curr.grnh1 <- st_read("./CurrentPointsGroupedNH2.shp")
+curr.grnh1[curr.grnh1$PointGroup == "Branch River-Milton",]$PointGroup <- "BS-Branch River-Milton"
+curr.grnh1 <- curr.grnh1[order(curr.grnh1$PointGroup),]
+curr.grnh1[which(grepl("^BS-",curr.grnh1$PointGroup)),]$PointGroup <- paste0(curr.grnh1[which(grepl("^BS-",curr.grnh1$PointGroup)),]$PointGroup,"-MEANCENTER")
+# curr.grnh1[which(grepl("^BS-",curr.grnh1$PointGroup)),]$PointGroup # CHECK
+
+
+curr.grnh1$PointGroup <- as.factor(curr.grnh1$PointGroup)
+curr.grnh1$Water_Body <- as.factor(curr.grnh1$Water_Body)
+curr.grnh2 <- st_drop_geometry(curr.grnh1) %>% 
+  select(PointGroup,Site_code,Water_Body,x,y,cOccu) %>% 
+  group_by(PointGroup) %>% 
+  summarise(SiteName=first(Site_code), 
+            WaterBody = first(Water_Body), 
+            Mean.x = mean(x), 
+            Mean.y = mean(y), 
+            PA = max(cOccu), 
+            .groups = 'drop')
+
+curr.grnh <- st_as_sf(curr.grnh2, coords=c("Mean.x","Mean.y"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+write_sf(curr.grnh,"./CurrentMeanPointsNH.shp", overwrite = T)
+```
+
+
+## Combined
+
+```{r}
+current.me.sf <- st_read("./CurrentMeanPointsME.shp")
+current.nh.sf <- st_read("./CurrentMeanPointsNH.shp")
+```
+```{r}
+current.me.df <- st_drop_geometry(current.me.sf)
+current.me.df$State <- "ME"
+
+current.nh.df <- st_drop_geometry(current.nh.sf)
+current.nh.df$Date <- NA # placeholder
+current.nh.df$State <- "NH"
+
+current.all.df1 <- rbind(current.me.df,current.nh.df)
+
+colnames(current.all.df1)[6] <- "cOccu"
+# colnames(current.all.df1)[1] <- "Site_code"
+
+# mejoin <- curr.me1 %>% select(Date,PointGroup) %>% group_by(PointGroup) %>% summarise(Date=min(Date))
+nhjoin <- curr.nh1 %>% select(-Water_Body,-x,-y,-State,-Site_Name,-cOccu) 
+
+current.all.df2 <- left_join(current.all.df1,nhjoin,by="PointGroup")
+# left_join(current.all.df1,mejoin, by = "PointGroup") %>%
+```
+
+Clean up
+```{r}
+# Fill in dates for NH data
+current.all.df2[current.all.df2$State == "NH" & 
+                  is.na(current.all.df2$Date.x),]$Date.x <- current.all.df2[current.all.df2$State == "NH" &                                                               is.na(current.all.df2$Date.x),]$Date.y
+# Remove Date.y column
+curr.nh.join <- curr.grnh1 %>% select(-Water_Body,-x,-y,-State,-Site_Name,-Site_code,-cOccu) %>% st_drop_geometry(.) %>% arrange(Date)
+current.all.df.date <- current.all.df2 %>% mutate(Date = Date.x) %>% select(-Date.x,-Date.y) %>% left_join(.,curr.nh.join, by="PointGroup", multiple = "first")
+# current.all.df2$Date <- as_date(current.all.df2$Date)
+
+current.all.df.date[which(grepl("-MEANCENTER",current.all.df.date$PointGroup)),]$Date.x <- current.all.df.date[which(grepl("-MEANCENTER",current.all.df.date$PointGroup)),]$Date.y
+```
+[1] "Source"     "Year"       "Date"       "WBType"     "Water_Body" "x"          "y"         
+ [8] "State"      "Site_Name"  "Site_code"  "SiteHist"   "BS_Pres"    "HStatus"    "hOccu"     
+[15] "PointType" 
+```{r}
+current.all.df.date[current.all.df.date$State == "NH" & 
+                  is.na(current.all.df.date$Source.x),]$Source.x <- current.all.df.date[current.all.df.date$State == "NH" & 
+                  is.na(current.all.df.date$Source.x),]$Source.y
+current.all.df.date[current.all.df.date$State == "ME" & 
+                  is.na(current.all.df.date$Source.x),]$Source.x <- "University of Maine Bridle Shiner Surveys 2021-2022"
+```
+
+Year
+```{r}
+current.all.df.date[is.na(current.all.df.date$Year.x),]$Year.x <- year(current.all.df.date[is.na(current.all.df.date$Year.x),]$Date.x)
+```
+
+Water body type
+```{r}
+current.all.df.date[current.all.df.date$State == "NH" & 
+                  is.na(current.all.df.date$WBType.x),]$WBType.x <- current.all.df.date[current.all.df.date$State == "NH" & 
+                  is.na(current.all.df.date$WBType.x),]$WBType.y
+current.all.df.date$WBType.x <- as.character(current.all.df.date$WBType.x)
+
+current.all.df.date$WBType <- NA
+
+current.all.df.date[which(grepl("Pond", current.all.df.date$WaterBody)),]$WBType <- "LakePond"
+current.all.df.date[which(grepl("Lake", current.all.df.date$WaterBody)),]$WBType <- "LakePond"
+current.all.df.date[which(grepl("Pond", current.all.df.date$WaterBody)),]$WBType <- "LakePond"
+current.all.df.date[which(grepl("River", current.all.df.date$WaterBody)),]$WBType <- "StreamRiver"
+current.all.df.date[which(grepl("Brook", current.all.df.date$WaterBody)),]$WBType <- "StreamRiver"
+current.all.df.date[which(grepl("Unnamed brook", current.all.df.date$WaterBody)),]$WBType <- "StreamRiver"
+current.all.df.date[current.all.df.date$WaterBody == "The Heath",]$WBType <- "LakePond"
+current.all.df.date[which(grepl("unnamed pond", current.all.df.date$WaterBody)),]$WBType <- "LakePond"
+current.all.df.date[which(grepl("outlet brook", current.all.df.date$WaterBody)),]$WBType <- "StreamRiver"
+current.all.df.date[current.all.df.date$SiteName == "SACONO-03",]$WBType <- "LakePond" # no longer connected to the Saco River
+current.all.df.date[current.all.df.date$State == "ME",]$WBType.x <- current.all.df.date[current.all.df.date$State == "ME",]$WBType
+
+current.all.df.wb <- current.all.df.date %>% 
+  select(-Source.y, -Year.y, -Date.y, -WBType.y, -WBType, -Site_code) %>% 
+  mutate(SiteCode = PointGroup, Source = Source.x, Year = Year.x, 
+         Date = Date.x, WBType = WBType.x) %>% 
+  select(-PointGroup,-Source.x, -Year.x, -Date.x, -WBType.x)
+```
+
+Survey coordinates
+```{r}
+current.all.df.wb[which(grepl("-MEANCENTER", current.all.df.wb$SiteCode)),]$PointType.x <- "Mean center point of 2+ surveys at this location"
+current.all.df.wb[current.all.df.wb$State == "ME",]$PointType.x <- "Mean center point of seine and/or eDNA sample replicates collected at this location"
+current.all.df.wb[current.all.df.wb$State == "ME" & current.all.df.wb$Year == 2022,]$PointType.x <- "Mean center point of eDNA sample replicates collected at this location"
+
+current.all.df.pt <- current.all.df.wb %>% select(-PointType.y) %>% mutate(PointType = PointType.x) %>% select(-PointType.x)
+```
+
+Site presence
+```{r}
+current.all.df.pt[which(grepl("-MEANCENTER", current.all.df.pt$SiteCode)),]$BS_Pres.x <- current.all.df.pt[which(grepl("-MEANCENTER", current.all.df.pt$SiteCode)),]$BS_Pres.y 
+current.all.df.pt[which(grepl("-MEANCENTER", current.all.df.pt$SiteCode)),]$CStatus.x <- current.all.df.pt[which(grepl("-MEANCENTER", current.all.df.pt$SiteCode)),]$CStatus.y 
+
+current.all.df.pt[current.all.df.pt$State == "ME" & current.all.df.pt$cOccu == 1,]$BS_Pres.x <- "Current"
+current.all.df.pt[current.all.df.pt$State == "ME" & current.all.df.pt$cOccu == 1,]$CStatus.x <- "Present"
+
+current.all.df.pt$BS_Pres.x <- as.character(current.all.df.pt$BS_Pres.x)
+current.all.df.pt$CStatus.x <- as.character(current.all.df.pt$CStatus.x)
+
+# Lake/pond sites in Maine for which we had no precise historical survey location
+current.all.df.pt[current.all.df.pt$State == "ME" & 
+                    current.all.df.pt$cOccu == 0 & 
+                    current.all.df.pt$Year == 2021,]$BS_Pres.x <- "Historically present in waterbody"
+
+current.all.df.pt[current.all.df.pt$State == "ME" & 
+                    current.all.df.pt$cOccu == 0 & 
+                    current.all.df.pt$WaterBody == "Saco River",]$BS_Pres.x <- "Historically present in the river and surrounding watershed"
+
+current.all.df.pt[current.all.df.pt$cOccu == 0 & 
+                    current.all.df.pt$WaterBody == "Ossipee River",]$BS_Pres.x <- "Historically present in the river and surrounding watershed"
+
+# Stream/river sites for which we had historical survey coordinates
+current.all.df.pt[current.all.df.pt$State == "ME" & 
+                    current.all.df.pt$cOccu == 0 & 
+                    current.all.df.pt$Year == 2021 &
+                    current.all.df.pt$WBType == "StreamRiver" & 
+                    current.all.df.pt$SiteName != "HIGHLK-03" & 
+                    current.all.df.pt$WaterBody != "Tenny River",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+
+# River sites for which we had no precise historical survey location
+current.all.df.pt[current.all.df.pt$WaterBody == "Tenny River",]$BS_Pres.x <- "Historically present in waterbody"
+
+
+# Lake/pond sites for which we had an approximate historical survey location
+current.all.df.pt[current.all.df.pt$WaterBody == "Bauneg Beg Pond",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+current.all.df.pt[current.all.df.pt$WaterBody == "Spectacle Pond",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+
+
+# Sites for which we had no historical occupancy data
+current.all.df.pt[current.all.df.pt$State == "ME" & 
+                    current.all.df.pt$cOccu == 0 & 
+                    current.all.df.pt$Year == 2022,]$BS_Pres.x <- "No historical record of occupancy"
+
+# But then correct for Sokokis and Crescent Lake
+current.all.df.pt[which(grepl("SOKOLK", current.all.df.pt$SiteName)),]$BS_Pres.x <- "Historically present in waterbody"
+current.all.df.pt[which(grepl("CRESLK", current.all.df.pt$SiteName)),]$BS_Pres.x <- "Historically present in waterbody"
+
+# Lake Winnipesaukee sites
+current.all.df.pt[current.all.df.pt$WaterBody == "Winnipesaukee Lake",]$BS_Pres.x <- "Historically present in waterbody"
+current.all.df.pt[which(grepl("Blackeys Cove", current.all.df.pt$SiteCode)),]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+current.all.df.pt[which(grepl("Fish Cove", current.all.df.pt$SiteCode)),]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+
+# NH river sites where bridle shiners were historically present somewhere within the river
+current.all.df.pt[current.all.df.pt$WaterBody == "Soucook River",]$BS_Pres.x <- "Historically present in the river and surrounding watershed"
+current.all.df.pt[current.all.df.pt$WaterBody == "Lamprey River",]$BS_Pres.x <- "Historically present in river"
+current.all.df.pt[current.all.df.pt$WaterBody == "Suncook River",]$BS_Pres.x <- "Historically present in the river and surrounding watershed"
+current.all.df.pt[current.all.df.pt$WaterBody == "Isinglass River",]$BS_Pres.x <- "Historically present in river"
+current.all.df.pt[current.all.df.pt$WaterBody == "Oyster River",]$BS_Pres.x <- "Historically present in river"
+current.all.df.pt[current.all.df.pt$WaterBody == "Powwow River",]$BS_Pres.x <- "Historically present in river"
+current.all.df.pt[current.all.df.pt$WaterBody == "Exeter River",]$BS_Pres.x <- "Historically present in river"
+current.all.df.pt[current.all.df.pt$WaterBody == "Cocheco River",]$BS_Pres.x <- "Historically present in river"
+
+current.all.df.pt[current.all.df.pt$SiteCode == "BS-Lamprey River-Epping-MEANCENTER",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+
+
+
+
+current.all.df.pt[current.all.df.pt$State == "ME" & 
+                    current.all.df.pt$cOccu == 0,]$CStatus.x <- "Absent"
+
+current.all.df.pt[current.all.df.pt$BS_Pres.x == "Absent",]$BS_Pres.x <- "No historical record of occupancy"
+current.all.df.pt[current.all.df.pt$CStatus.x == "Extirpated",]$BS_Pres.x <- "Historically present in waterbody"
+current.all.df.pt[current.all.df.pt$CStatus.x == "Presumed extirpated",]$BS_Pres.x <- "Historically present in waterbody"
+current.all.df.pt[current.all.df.pt$SiteCode == "UNK-Lamprey River-Bunker Pond-Epping",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+current.all.df.pt[current.all.df.pt$SiteCode == "UNK-Oyster River-Mill Pond-Durham",]$BS_Pres.x <- "Historically present in vicinity of coordinates"
+
+current.all.stat <- current.all.df.pt %>% select(-BS_Pres.y,-CStatus.y,-SiteHist.x) %>% mutate(BS_Pres = BS_Pres.x, CStatus = CStatus.x, SiteHist=SiteHist.y) %>% select(-BS_Pres.x,-CStatus.x,-SiteHist.y)
+```
+
+```{r}
+me.sitehist.join <- curr.gr2 %>% mutate(SiteCode = PointGroup) %>% select(SiteCode,SiteHist)
+current.all <- left_join(current.all.stat, me.sitehist.join, by="SiteCode",multiple = "first")
+current.all[current.all$State == "ME",]$SiteHist.x <- current.all[current.all$State == "ME",]$SiteHist.y
+current.all <- current.all %>% mutate(SiteHist = SiteHist.x) %>% select(-SiteHist.x,-SiteHist.y)
+current.all <- current.all[,c(8:11,2,6,3,4,1,7,15,13,14,5,12)]
+current.all <- current.all[order(current.all$Date),]
+```
+
+
+### Save outputs
+
+```{r}
+write.csv(current.all, "./CurrentBridleShinerPoints.csv")
+current <- st_as_sf(current.all, coords=c("Mean_x","Mean_y"), crs=26919, 
+                    remove = F, # remove x and y columns from data.frame
+                    agr="identity" # columns (attributes) uniquely identify the geometry of each point
+                    )
+write_sf(current,"./CurrentBridleShinerPoints.shp",overwrite=TRUE)
+```
+
+
+# Old code, ignore
+
+```{r}
+# Function from https://github.com/josiahparry/sfdep/blob/HEAD/R/point-pattern-centers.R
+# center_mean <- function(geometry, weights = NULL) {
+#   geometry <- check_polygon(geometry)
+#   crs <- sf::st_crs(geometry)
+#   coords <- sf::st_coordinates(geometry)
+# 
+#   n <- nrow(coords)
+# 
+#   if (!is.null(weights)) {
+#     # https://github.com/JosiahParry/sfdep/issues/35
+#     # shouts out @JoseLastra
+#     res <- colSums(coords * weights) / sum(weights, na.rm = TRUE)
+#   } else {
+#     res <- colSums(coords) / n
+#   }
+#   sf::st_sfc(sf::st_point(res), crs = crs)
+# }
+```

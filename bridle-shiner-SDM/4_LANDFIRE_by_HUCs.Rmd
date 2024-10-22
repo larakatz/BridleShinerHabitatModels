@@ -1,0 +1,2077 @@
+---
+title: "Input LANDFIRE raster prep (by HUC12)"
+author: "Lara Katz"
+date: "2024-01-17"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Load libraries
+```{r, include=FALSE}
+library(raster)
+library(terra)
+library(tidyterra)
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(ggspatial)
+library(terra)
+# library(leaflet)
+# library(mapview)
+# library(lmtest) # for BP test
+# library(tseries) # for Jarque-Bera test
+# library(car) # for avPlots
+# library(leaps)
+# library(spdep)
+```
+
+# Create polygon of modeling area
+
+Load shapefile of historical range, change projection to UTM Zone 19N to match raster.
+```{r}
+range <- vect("./Inputs_raw/SacoMerrimackHUC6.shp")
+range <- project(range, y = "epsg:26919") # EPSG for NAD83 / UTM Zone 19N
+range <- aggregate(range, dissolve = TRUE) # dissolve into 1 feature
+plot(range)
+```
+
+Make shapefiles of oceans, estuaries, and estuarine wetlands to omit from the model extent:
+```{r}
+# Connecticut
+ocean.ct1 <- vect("NHD_H_Connecticut_State_GDB.gdb", layer="NHDArea")
+ocean.ct <- ocean.ct1[ocean.ct1$ftype == 445] # SeaOcean
+ocean.ct <- ocean.ct %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+# Massachusetts
+ocean.ma1 <- vect("NHD_H_Massachusetts_State_GDB.gdb", layer="NHDArea")
+ocean.ma <- ocean.ma1[ocean.ma1$ftype == 445] # SeaOcean
+ocean.ma <- ocean.ma %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+# Maine
+ocean.me1 <- vect("NHD_H_Maine_State_GDB.gdb", layer="NHDArea")
+ocean.me <- ocean.me1[ocean.me1$ftype == 445] # SeaOcean
+ocean.me <- ocean.me %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+# Rhode Island
+ocean.ri1 <- vect("NHD_H_Rhode_Island_State_GDB.gdb", layer="NHDArea")
+ocean.ri <- ocean.ri1[ocean.ri1$ftype == 445] # SeaOcean
+ocean.ri <- ocean.ri %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+# New York
+ocean.ny1 <- vect("NHD_H_New_York_State_GDB.gdb", layer="NHDArea")
+ocean.ny <- ocean.ny1[ocean.ny1$ftype == 445] # SeaOcean
+ocean.ny <- ocean.ny %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+# New Hampshire
+ocean.nh1 <- vect("NHD_H_New_Hampshire_State_GDB.gdb", layer="NHDArea")
+ocean.nh <- ocean.nh1[ocean.nh1$ftype == 445] # SeaOcean
+ocean.nh <- ocean.nh %>% 
+  project(.,y = "epsg:26919") %>% 
+  st_as_sf(.) %>% 
+  st_union(.) %>%
+  st_as_sf(.)
+
+salt <- dplyr::bind_rows(list(ocean.ct, ocean.me, ocean.ma, 
+                              ocean.ri, ocean.ny, ocean.nh)) %>%
+  st_union(.) %>% 
+  st_transform(., crs=26919) %>% 
+  st_as_sf(.) %>% 
+  vect(.) %>% 
+  fillHoles(.) # no islands
+plot(salt)
+
+writeVector(salt, "./Intermediate/Marine_habitats.shp", overwrite=TRUE)
+
+# ocean <- vect("./Inputs_raw/Coastline2.shp")
+# ocean <- fillHoles(ocean) %>% project(., y = "epsg:26919") %>% st_as_sf(.)
+# salt <- project(salt, y = "epsg:26919") %>% st_as_sf(.)
+# nopredict <- st_as_sf(st_union(salt, ocean))
+# nopredict.spat <- vect(nopredict)
+# 
+# st_write(nopredict, "./Intermediate/Coastline_nopredict.shp", overwrite=TRUE)
+```
+
+Create a 50km buffer around the HUC6 range and save as a shapefile. This will be the model extent:
+```{r}
+# Ocean mask
+# ocean <- vect("./Intermediate/Marine_habitats.shp") # NHDArea SeaOcean with boundaries extended eastward to erase study area buffers
+# 
+# # Mask of Massachusetts
+# mass <- vect("./Inputs_raw/MA_boundary_no_estuary.shp") # Massachusetts boundary
+# mass <- project(mass, y = "epsg:26919") %>%
+#   erase(., ocean) %>% # erase using saltwater coastline features
+#   fillHoles(.) # remove islands
+# 
+# # Mask of Vermont
+# vt <- vect("./Inputs_raw/VT_boundary.shp") # Vermont boundary
+# vt <- project(vt, y = "epsg:26919") %>% buffer(.,0.5) # issues along the border with MA, add a 0.5m buffer so features intersect
+# 
+# # Buffer and erase parts of buffer outside of ME and NH
+# range.buff50 <- terra::buffer(range, 50000) # 50 km buffer
+# range.buff50 <- erase(range.buff50, mass) # erase parts of buffer in Massachusetts
+# range.buff50 <- erase(range.buff50, vt) # erase parts of buffer in Vermont
+# range.buff50 <- erase(range.buff50, ocean) # erase parts of buffer in ocean
+# plot(range.buff50)
+# 
+# # Save
+# writeVector(range.buff50, "./Inputs_vectors/Model_extent.shp", overwrite=T)
+range.buff50 <- vect("./Inputs_vectors/Model_extent.shp")
+range.buff50.sf <- st_as_sf(range.buff50)
+```
+
+# LANDFIRE raster preparation
+
+Load raster using `raster` package (so it can load the raster attribute table). Then convert to a SpatRaster in `terra`.
+```{r}
+# biophys <- raster("./Inputs_raw/LANDFIRE/LC20_BPS_220.tif", RAT = T) # load raster with attribute table
+# biophys_t <- terra::rast(biophys) # convert to terra SpatRaster
+# plot(biophys_t)
+```
+
+Project to NAD83 UTM Zone 19N
+```{r}
+# biophys_p <- project(biophys_t, y = "epsg:26919")
+# cats_bps <- cats(biophys_p)[[1]] %>% dplyr::select(VALUE,BPS_NAME)
+# write.csv(cats_bps, "./landfire_cats.csv")
+```
+
+Reclassify duplicate and triplicate landcover classes
+```{r}
+# rcls <- read.csv("./Inputs_raw/rcls_values.csv", header = TRUE)
+# biophys_rcls <- classify(biophys_p, rcl = rcls)
+# levels(biophys_rcls) <- cats_bps 
+# activeCat(biophys_rcls) <- "BPS_NAME"
+# # biophys_rcls <- droplevels(biophys_rcls, layer = 1) # Drop unused levels
+# 
+# levels(biophys_rcls)
+# plot(biophys_rcls)
+# writeRaster(biophys_rcls, "./Intermediate/biophys_rcls_30m.tif", overwrite = TRUE)
+```
+
+Set categories
+```{r}
+# biophys_rcls <- raster("./Intermediate/biophys_rcls_30m.tif", RAT=TRUE) # load raster with attribute table
+# biophys_rcls_t <- terra::rast(biophys_rcls) # convert to terra SpatRaster
+# levels(biophys_rcls_t)[[1]] <- cats_bps # What data are included in the RAT?
+# activeCat(biophys_rcls_t) <- "BPS_NAME" # set active category to habitat name
+# plot(biophys_rcls_t) # check
+```
+
+Drop the `NoData` and `Fill-Not Mapped` categories.
+```{r}
+# levels(biophys_rcls_t)
+# biophys_drop <- droplevels(biophys_rcls_t, layer=1)
+# levels(biophys_drop)
+# plot(biophys_drop) #check
+# writeRaster(biophys_drop, "./Intermediate/biophys_drop.tif", overwrite=T)
+```
+
+Load shapefile of small and large HUCs, change projection to UTM Zone 19N to match raster.
+```{r}
+huc14 <- st_read("./Inputs_vectors/small_hucs.shp") %>% st_transform(.,crs=26919) # EPSG for NAD83 / UTM Zone 19N
+huc14$areasqkm <- as.numeric(huc14$areasqkm)
+huc14 <- huc14[huc14$areasqkm > 0.029,] # remove shapes created by overlapping hucs
+huc12 <- st_read("./Inputs_vectors/large_hucs.shp") %>% st_transform(.,crs=26919) %>% filter(name != "Johns Bay-Boothbay Harbor")
+# plot(hucs)
+```
+
+Select HUCs that intersect the study area:
+```{r}
+# huc14.x <- huc14[range.buff50.sf,]
+# huc12.x <- huc12[range.buff50.sf,]
+# 
+# plot(huc14.x[1])
+# plot(huc12.x[1])
+# 
+# st_write(huc14.x, "./Inputs_vectors/small_hucs_intersect.shp", append=F)
+# st_write(huc12.x, "./Inputs_vectors/large_hucs_intersect.shp", append=F)
+
+huc14.x <- st_read("./Inputs_vectors/small_hucs_intersect.shp")
+huc12.x <- st_read("./Inputs_vectors/large_hucs_intersect.shp")
+
+# extent <- dplyr::bind_rows(list(huc14.x, huc12.x)) %>% st_union(.) %>% st_as_sf(.) %>% vect(.)
+# writeVector(extent, "./Inputs_vectors/all_hucs_extent.shp", overwrite=T)
+extent <- vect("./Inputs_vectors/all_hucs_extent.shp")
+```
+
+Crop LANDFIRE raster to the outline of HUCs
+```{r}
+# biophys_crop <- crop(biophys_drop, ext(extent)) # Crop to extent of HUC polygon layers
+```
+
+Aggregate raster cells by cell value to save processing time
+```{r}
+# original_res <- res(biophys_crop) # original cell size (30m x 30m)
+# target_res <- c(10,10) # larger cell size (90m x 90m)
+# 
+# agg_raster <- aggregate(biophys_crop,
+#                         fact = target_res,
+#                         na.rm = TRUE,
+#                         fun = "modal", # nearest-neighbor resampling keeps categorical values intact
+#                         cores = 12)
+# agg_drop <- droplevels(agg_raster, layer=1)
+#
+# activeCat(agg_drop) <- "BPS_NAME"
+# 
+# plot(agg_drop)
+```
+
+Save raster and reload
+```{r}
+# agg_mask <- terra::mask(agg_drop, extent) # Mask to shape of HUCs in MENH
+# 
+# writeRaster(agg_mask, "./Intermediate/landfire_MENH_sw_300m.tif", overwrite = TRUE)
+agg_raster <- raster("./Intermediate/landfire_MENH_sw_300m.tif", RAT = TRUE) # Load in raster package to get attribute table
+agg_raster <- rast(agg_raster) # Convert back to terra SpatRaster
+
+lev <- cats(agg_raster)
+lev_df <- as.data.frame(lev[[1]]) # Make raster attribute table into a data frame
+
+activeCat(agg_raster) <- "BPS_NAME" # set active category to habitat name
+plot(agg_raster) # check
+```
+
+Convert raster to polygons:
+```{r}
+biophys_poly <- terra::as.polygons(agg_raster, dissolve = TRUE, values = TRUE)
+writeVector(biophys_poly, "./Intermediate/biophys_poly_300m.shp")
+saveRDS(biophys_poly, "./Intermediate/biophys_poly_sw_300m.RDS")
+biophys_poly <- readRDS("./Intermediate/biophys_poly_sw_300m.RDS")
+# plot(biophys_poly)
+```
+
+# Small HUCs
+
+## Habitat proportions (LANDFIRE)
+
+Prepare for-loop inputs
+```{r}
+length(unique(huc14.x$label))
+# huc14.x$FID_1 <- 1:nrow(huc14.x)
+
+huc.small <- vect("./Inputs_vectors/small_hucs_intersect.shp")
+
+HUC_name <- unique(huc.small$label) # Extract each unique HUC12 name
+
+habitat_type <- as.character(unique(lev_df$BPS_NAME)) # Extract each unique habitat name
+
+hlength <- length(habitat_type) # How many habitat types are there?
+```
+
+Calculate percent of each small HUC (i) covered by each habitat type (j) with a for loop
+```{r, echo=FALSE, warning=FALSE}
+# Initialize empty data frames to store the results
+area_covered <- data.frame() # empty dataframe
+result_df <- data.frame(huc = character(0),
+                        HabitatType = character(0),
+                        PercentArea = numeric(0)) # Always start with an empty dataframe!!
+
+for (i in 1:length(HUC_name)) {
+
+  # Crop the habitat polygons to the current HUC's (i) boundary
+  crop_poly <- crop(biophys_poly, huc.small[i])
+  
+  if (i == 10 | i == 500 | i == 1000 | i == 1500){
+    print(HUC_name[i]) # Progress update
+  } else { # don't print every site name, way too many!
+    } # end if-else statement
+  
+  for (j in 1:hlength) {
+    if (habitat_type[j] %in% crop_poly$BPS_NAME){# Keep polygons of the desired habitat type (j)
+    keep_poly <- crop_poly[crop_poly$BPS_NAME == habitat_type[j],]
+
+    # Calculate the area covered by habitat type j in km2
+    area_covered <- if (length(expanse(keep_poly, unit = "km")) > 0) {
+      expanse(keep_poly, unit = "km")
+      } else {0}  # If a habitat doesn't exist in the HUC12, expanse() will return a blank instead of zero
+
+    # Calculate the total area of HUC i in km2
+    total_area <- expanse(huc.small[i], unit = "km") # Includes water so no NA space
+
+    # Calculate the percent of town i covered by habitat type j
+    percent_area_covered <- (area_covered / total_area) * 100
+
+    # Append the results to the result_df data frame
+    result_df <- rbind(result_df,
+                       data.frame(huc = huc.small[i]$label,
+                                  HabitatType = habitat_type[j],
+                                  PercentArea = percent_area_covered))
+    } else {
+      result_df <- rbind(result_df,
+                       data.frame(huc = huc.small[i]$label,
+                                  HabitatType = habitat_type[j],
+                                  PercentArea = 0))
+    }  # end if-else statement
+
+    }
+  # cat("Finished with town: ", town_agg[i,]$TOWN) # Progress update
+}
+saveRDS(result_df, "./result_df_small.RDS")
+```
+
+Look at output
+```{r}
+head(result_df)
+```
+
+Pivot wider
+```{r, echo=FALSE}
+habitat.areas <- result_df %>% pivot_wider(., names_from = HabitatType, values_from = PercentArea)
+view(habitat.areas)
+any(rowSums(habitat.areas[,-1]) > 100.1) # check to make sure that none of the percentages are over 100%
+# rowSums(habitat.areas[,-1])
+any(colSums(habitat.areas[,-1]) == 0)
+sums <- colSums(habitat.areas[,-1])
+which(sums == 0)
+habitat.areas <- habitat.areas[,-(unname(which(sums == 0))+1)]
+```
+
+Save to csv
+```{r}
+write.csv(habitat.areas, "./Outputs_csv/habitat_percentages_small_huc.csv")
+habitat.areas.S <- read.csv("./Outputs_csv/habitat_percentages_small_huc.csv", header = TRUE, row.names = 1)
+# colnames(habitat.areas)[1] <- "huc12.id"
+```
+
+
+## Lithology proportions
+
+Load raster using `raster` package (so it can load the raster attribute table). Then convert to a SpatRaster in `terra`.
+```{r}
+lith <- terra::rast("./Inputs_raw/lithology90m.tif") # already in UTM Zone 19N
+```
+
+Set categories
+```{r}
+values <- unique(lith$b1)
+values
+class <- c("Water",
+           "Carbonate",
+           "Non-carbonate",
+           "Silicic residual",
+           "Colluvial sediment", 
+           "Glacial till clay", 
+           "Glacial till loam",
+           "Glacial till coarse", 
+           "Glacial lake sediment fine",
+           "Glacial outwash coarse", 
+           "Hydric", 
+           "Eolian sediment coarse", 
+           "Eolian sediment fine",
+           "Alluvium and coastal sediment fine",
+           "Coastal sediment coarse")
+lith.cats <- as.data.frame(cbind(values, class))
+
+levels(lith) <- lith.cats
+activeCat(lith) <- "class" # set active category to lith class name
+terra::plot(lith) # check
+```
+
+Crop to outline of HUCs:
+```{r}
+lith_crop <- crop(lith, ext(extent))
+lith_mask <- mask(lith_crop, extent)
+plot(lith_mask)
+```
+
+Drop unused levels and water since we've already estimated this cover type:
+```{r}
+lith_drop <- droplevels(lith_mask, layer=1) # unused levels
+# lith_drop <- droplevels(lith_drop, level=0, layer=1) # water
+levels(lith_drop)
+
+lev_df_lith <- levels(lith_drop)
+lev_df_lith <- lev_df_lith[[1]]
+```
+
+
+Convert raster to polygons:
+```{r}
+lith_poly <- terra::as.polygons(lith_drop, dissolve = TRUE, values = TRUE)
+writeVector(lith_poly, "./Intermediate/lith_poly_90m.shp", overwrite=T)
+lith_poly <- vect("./Intermediate/lith_poly_90m.shp")
+plot(lith_poly)
+```
+
+Prepare for-loop inputs
+```{r}
+huc.small <- vect("./Inputs_vectors/small_hucs_intersect.shp")
+HUC_name <- unique(huc.small$label) # Extract each unique HUC name
+
+lith_type <- as.character(unique(lev_df_lith$class)) # Extract each unique lithology class name
+
+l.length <- length(lith_type) # How many lithology classes are there?
+```
+
+Calculate percent of each HUC (i) covered by each lithology type (j) with a for loop
+```{r, echo=FALSE, warning=FALSE}
+# Initialize empty data frames to store the results
+area_covered <- as.data.frame(matrix(NA,nrow = l.length, ncol = 1)) # empty dataframe
+result_df <- data.frame(huc = character(0),
+                        LithClass = character(0),
+                        PercentArea = numeric(0)) # Always start with an empty dataframe!!
+
+for (i in 1:length(HUC_name)) {
+
+  # Crop the habitat polygons to the current HUC's (i) boundary
+  crop_poly <- crop(lith_poly, huc.small[i])
+
+  if (i == 10 | i == 500 | i == 1000 | i == 1500){
+    print(huc.small[i,]$label) # Progress update
+  } else { # don't print every huc name, way too many!
+    
+  } # end if-else statement
+
+  for (j in 1:l.length) { # begin j loop
+    if (lith_type[j] %in% crop_poly$class){
+      # Keep polygons of the desired lithology type (j)
+      # keep_poly <- crop_poly[crop_poly$class == lith_type[j]]
+      keep_poly <- crop_poly %>% filter(class == lith_type[j])
+
+      # Calculate the area covered by class type j in km2
+      area_covered <- if (length(expanse(keep_poly, unit = "km")) > 0) {
+        expanse(keep_poly, unit = "km")
+        } else {0}  # If a class doesn't exist in the HUC12, expanse() will return a blank instead of zero
+
+      # Calculate the total area of HUC i in km2
+      total_area <- expanse(huc.small[i], unit = "km") 
+
+      # Calculate the percent of HUC i covered by lithology type j
+      percent_area_covered <- (area_covered / total_area) * 100
+    
+      # Append the results to the result_df data frame
+      result_df <- rbind(result_df,
+                         data.frame(huc = huc.small[i]$label,
+                                    LithClass = lith_type[j],
+                                    PercentArea = percent_area_covered))
+      } else {
+      result_df <- rbind(result_df,
+                         data.frame(huc = huc.small[i]$label,
+                                    LithClass = lith_type[j],
+                                    PercentArea = 0))
+      }  # end if-else statement
+    } # end j loop
+  } # end i loop
+saveRDS(result_df, "./result_df_lith.RDS")
+```
+
+Look at output
+```{r}
+head(result_df)
+```
+
+Pivot wider and drop lithology classes with 0% cover
+```{r, echo=FALSE}
+lith.areas <- result_df %>% pivot_wider(., names_from = LithClass, values_from = PercentArea)
+view(lith.areas)
+any(rowSums(lith.areas[,-1]) > 100.1) # check to make sure that none of the percentages are over 100%
+# rowSums(lith.areas[,-1])
+any(colSums(lith.areas[,-1]) == 0)
+sums <- colSums(lith.areas[,-1])
+which(sums == 0)
+lith.areas <- lith.areas[,-(unname(which(sums == 0))+1)]
+```
+
+Save to csv
+```{r}
+write.csv(lith.areas, "./Outputs_csv/lith_percentages_small_huc.csv")
+lith.areas.S <- read.csv("./Outputs_csv/lith_percentages_small_huc.csv", header = TRUE, row.names = 1)
+# colnames(lith.areas)[1] <- "huc12.id"
+```
+
+## Soil variables and elevation
+
+Load substrate rasters using the `terra` package:
+```{r}
+elev <- rast("./Inputs_raw/Elevation_HUC6_30m.tif") # same raster used to create small hucs
+
+stack <- rast(c("./datos/clay_19N.tif", 
+                "./datos/SandContent_19N.tif", 
+                "./datos/SiltContent_19N.tif"))
+names(stack) <- c("clay","sand","silt")
+plot(stack)
+```
+
+Project to NAD83 UTM Zone 19N:
+```{r}
+stack_p <- project(stack, y = "epsg:26919")
+elev_p <- project(elev, y = "epsg:26919")
+```
+
+### Crop rasters
+
+Resample and crop to species distribution model extent:
+```{r}
+stack_crop <- crop(stack_p, ext(extent))
+stack_sw <- mask(stack_crop, extent)
+plot(stack_sw)
+writeRaster(stack_sw$clay, "./Intermediate/clay_crop_225m.tif", overwrite = TRUE) # save raster
+writeRaster(stack_sw$silt, "./Intermediate/silt_crop_225m.tif", overwrite = TRUE) # save raster
+writeRaster(stack_sw$sand, "./Intermediate/sand_crop_225m.tif", overwrite = TRUE) # save raster
+
+# elev_r <- resample(elev_p, snap, method = "bilinear")
+elev_crop <- crop(elev_p, ext(extent)) 
+elev_sw <- terra::mask(elev_crop, extent) # Mask to shape of model extent
+plot(elev_sw)
+writeRaster(elev_sw, "./Intermediate/elev_crop_30m.tif", overwrite = TRUE) # save raster
+```
+
+### Zonal statistics
+
+Calculate the mean value of each variable within each HUC:
+```{r}
+stack_z <- zonal(stack_sw, huc.small, "mean", na.rm = TRUE, as.raster = FALSE, 
+                 # filename = "./Outputs_csv/Zonal_stats_soilS.csv", 
+                 exact=TRUE)
+
+
+elev_z <- zonal(elev_sw, huc.small, "mean", na.rm=TRUE, as.raster=FALSE, 
+                # filename="./Outputs_csv/Zonal_stats_elevS.csv", 
+                exact=TRUE)
+
+huc.small.z <- as.data.frame(cbind(huc = huc.small$label, stack_z, elev_z))
+
+write.csv(huc.small.z, "./Outputs_csv/Zonal_stats_small.csv")
+huc.small.z <- read.csv("./Outputs_csv/Zonal_stats_small.csv")
+```
+
+## Create points and append variables to shapefile
+
+```{r}
+huc.s.crop <- crop(huc.small, range.buff50)
+plot(huc.s.crop)
+
+points.S <- centroids(huc.s.crop, inside=T) %>% mutate(huc = label) %>% dplyr::select(huc)
+
+points.S.env <- points.S %>% 
+  left_join(., huc.small.z, by="huc") %>% 
+  left_join(., lith.areas.S, by="huc") %>% 
+  left_join(., habitat.areas.S, by="huc") %>% 
+  dplyr::select(-Water)
+```
+
+
+```{r}
+names(points.S.env)
+names(points.S.env)[11:36] <- c("Barren",
+                                "LAc_NHardwd",
+                                "NAtl_CoastPlain_Hardwd",
+                                "LAc_NPineOak",
+                                "LAc_PineHemlockHardwd",
+                                "CAp_Dry_OakPine",
+                                "Ap_Hemlock_NHardwd",
+                                "Ac_LoElev_SpruceFirHardwd",
+                                "AcAp_Montane_SpruceFir",
+                                "CentAp_PineOak_Rocky_Wd",
+                                "NAtl_Coast_Plain_Maritime",
+                                "NAtl_Coast_Plain_Dune",
+                                "CentIntAp_FloodplainSys",
+                                "CentIntAp_RiparianSys",
+                                "LAc_FloodplainSys",
+                                "Bor_Acidic_PeatSys",
+                                "CentIntAp_SwampSys",
+                                "GulfAtl_CoastPlain_SwampSys",
+                                "GulfAtl_CoastPlain_TMarshSys",
+                                "LAc_ShrubHerb_WetlSys",
+                                "NCentInt_Wet_Flatwd",
+                                "LAc_SwampSys",
+                                "NeInt_PineBarrens",
+                                "AcAp_WdHeathKrummholz",
+                                "Bor_JackPineBlackSpruce",
+                                "AcAp_AlpineTundra")
+
+writeVector(points.S.env, "./biomod/input_small_hucs.shp", overwrite=T)
+```
+
+Shapefile of polygons to join with presence absence data:
+```{r}
+huc.s.env <- huc.s.crop %>% st_as_sf(.) %>% 
+  mutate(huc = label) %>% 
+  left_join(., huc.small.z, by="huc") %>% 
+  left_join(., lith.areas.S, by="huc") %>% 
+  left_join(., habitat.areas.S, by="huc") %>% 
+  dplyr::select(-Water, -label, -cat, -value, -FID_1, -areasqkm) %>% 
+  vect(.)
+
+names(huc.s.env)
+names(huc.s.env)[11:36] <- c("Barren",
+                                "LAc_NHardwd",
+                                "NAtl_CoastPlain_Hardwd",
+                                "LAc_NPineOak",
+                                "LAc_PineHemlockHardwd",
+                                "CAp_Dry_OakPine",
+                                "Ap_Hemlock_NHardwd",
+                                "Ac_LoElev_SpruceFirHardwd",
+                                "AcAp_Montane_SpruceFir",
+                                "CentAp_PineOak_Rocky_Wd",
+                                "NAtl_Coast_Plain_Maritime",
+                                "NAtl_Coast_Plain_Dune",
+                                "CentIntAp_FloodplainSys",
+                                "CentIntAp_RiparianSys",
+                                "LAc_FloodplainSys",
+                                "Bor_Acidic_PeatSys",
+                                "CentIntAp_SwampSys",
+                                "GulfAtl_CoastPlain_SwampSys",
+                                "GulfAtl_CoastPlain_TMarshSys",
+                                "LAc_ShrubHerb_WetlSys",
+                                "NCentInt_Wet_Flatwd",
+                                "LAc_SwampSys",
+                                "NeInt_PineBarrens",
+                                "AcAp_WdHeathKrummholz",
+                                "Bor_JackPineBlackSpruce",
+                                "AcAp_AlpineTundra")
+
+writeVector(huc.s.env, "./biomod/input_small_hucs_poly.shp", overwrite = T)
+# st_write(huc.s.env, "./biomod/input_small_hucs_poly.shp", append = F)
+```
+
+
+# Large HUCs (HUC12)
+
+## Habitat proportions (LANDFIRE)
+
+Prepare for-loop inputs
+```{r}
+huc.large <- vect("./Inputs_vectors/large_hucs_intersect.shp")
+
+HUC_name <- unique(huc.large$label) # Extract each unique HUC12 name
+
+habitat_type <- as.character(unique(lev_df$BPS_NAME)) # Extract each unique habitat name
+
+hlength <- length(habitat_type) # How many habitat types are there?
+```
+
+Calculate percent of each small HUC (i) covered by each habitat type (j) with a for loop
+```{r, echo=FALSE, warning=FALSE}
+# Initialize empty data frames to store the results
+area_covered <- data.frame() # empty dataframe
+result_df <- data.frame(huc = character(0),
+                        HabitatType = character(0),
+                        PercentArea = numeric(0)) # Always start with an empty dataframe!!
+
+for (i in 1:length(HUC_name)) {
+
+  # Crop the habitat polygons to the current HUC's (i) boundary
+  crop_poly <- crop(biophys_poly, huc.large[i])
+  
+  if (i == 10 | i == 500 | i == 1000 | i == 1500){
+    print(HUC_name[i]) # Progress update
+  } else { # don't print every site name, way too many!
+    } # end if-else statement
+  
+  for (j in 1:hlength) {
+    if (habitat_type[j] %in% crop_poly$BPS_NAME){# Keep polygons of the desired habitat type (j)
+    keep_poly <- crop_poly[crop_poly$BPS_NAME == habitat_type[j],]
+
+    # Calculate the area covered by habitat type j in km2
+    area_covered <- if (length(expanse(keep_poly, unit = "km")) > 0) {
+      expanse(keep_poly, unit = "km")
+      } else {0}  # If a habitat doesn't exist in the HUC12, expanse() will return a blank instead of zero
+
+    # Calculate the total area of HUC i in km2
+    total_area <- expanse(huc.large[i], unit = "km") # Includes water so no NA space
+
+    # Calculate the percent of town i covered by habitat type j
+    percent_area_covered <- (area_covered / total_area) * 100
+
+    # Append the results to the result_df data frame
+    result_df <- rbind(result_df,
+                       data.frame(huc = huc.large[i]$label,
+                                  HabitatType = habitat_type[j],
+                                  PercentArea = percent_area_covered))
+    } else {
+      result_df <- rbind(result_df,
+                       data.frame(huc = huc.large[i]$label,
+                                  HabitatType = habitat_type[j],
+                                  PercentArea = 0))
+    }  # end if-else statement
+
+    }
+  # cat("Finished with town: ", town_agg[i,]$TOWN) # Progress update
+}
+saveRDS(result_df, "./result_df_large.RDS")
+```
+
+Look at output
+```{r}
+head(result_df)
+```
+
+Pivot wider
+```{r, echo=FALSE}
+habitat.areas <- result_df %>% pivot_wider(., names_from = HabitatType, values_from = PercentArea)
+view(habitat.areas)
+any(rowSums(habitat.areas[,-1]) > 100.1) # check to make sure that none of the percentages are over 100%
+# rowSums(habitat.areas[,-1])
+any(colSums(habitat.areas[,-1]) == 0)
+sums <- colSums(habitat.areas[,-1])
+which(sums == 0)
+habitat.areas <- habitat.areas[,-(unname(which(sums == 0))+1)]
+```
+
+Save to csv
+```{r}
+write.csv(habitat.areas, "./Outputs_csv/habitat_percentages_huc12.csv")
+habitat.areas.L <- read.csv("./Outputs_csv/habitat_percentages_huc12.csv", header = TRUE, row.names = 1)
+# colnames(habitat.areas)[1] <- "huc12.id"
+```
+
+
+## Lithology proportions
+
+Load raster using `raster` package (so it can load the raster attribute table). Then convert to a SpatRaster in `terra`.
+```{r}
+lith <- terra::rast("./Inputs_raw/lithology90m.tif") # already in UTM Zone 19N
+```
+
+Set categories
+```{r}
+values <- unique(lith$b1)
+values
+class <- c("Water",
+           "Carbonate",
+           "Non-carbonate",
+           "Silicic residual",
+           "Colluvial sediment", 
+           "Glacial till clay", 
+           "Glacial till loam",
+           "Glacial till coarse", 
+           "Glacial lake sediment fine",
+           "Glacial outwash coarse", 
+           "Hydric", 
+           "Eolian sediment coarse", 
+           "Eolian sediment fine",
+           "Alluvium and coastal sediment fine",
+           "Coastal sediment coarse")
+lith.cats <- as.data.frame(cbind(values, class))
+
+levels(lith) <- lith.cats
+activeCat(lith) <- "class" # set active category to lith class name
+terra::plot(lith) # check
+```
+
+Crop to outline of HUCs:
+```{r}
+lith_crop <- crop(lith, ext(extent))
+lith_mask <- mask(lith_crop, extent)
+plot(lith_mask)
+```
+
+Drop unused levels and water since we've already estimated this cover type:
+```{r}
+lith_drop <- droplevels(lith_mask, layer=1) # unused levels
+# lith_drop <- droplevels(lith_drop, level=0, layer=1) # water
+levels(lith_drop)
+
+lev_df_lith <- levels(lith_drop)
+lev_df_lith <- lev_df_lith[[1]]
+```
+
+
+Convert raster to polygons:
+```{r}
+# lith_poly <- terra::as.polygons(lith_drop, dissolve = TRUE, values = TRUE)
+# writeVector(lith_poly, "./Intermediate/lith_poly_90m.shp", overwrite=T)
+lith_poly <- vect("./Intermediate/lith_poly_90m.shp")
+plot(lith_poly)
+```
+
+Prepare for-loop inputs
+```{r}
+huc.large <- vect("./Inputs_vectors/large_hucs_intersect.shp")
+HUC_name <- unique(huc.large$label) # Extract each unique HUC name
+
+lith_type <- as.character(unique(lev_df_lith$class)) # Extract each unique lithology class name
+
+l.length <- length(lith_type) # How many lithology classes are there?
+```
+
+Calculate percent of each HUC (i) covered by each lithology type (j) with a for loop
+```{r, echo=FALSE, warning=FALSE}
+# Initialize empty data frames to store the results
+area_covered <- as.data.frame(matrix(NA,nrow = l.length, ncol = 1)) # empty dataframe
+result_df <- data.frame(huc = character(0),
+                        LithClass = character(0),
+                        PercentArea = numeric(0)) # Always start with an empty dataframe!!
+
+for (i in 1:length(HUC_name)) {
+
+  # Crop the habitat polygons to the current HUC's (i) boundary
+  crop_poly <- crop(lith_poly, huc.large[i])
+
+  if (i == 10 | i == 500 | i == 1000 | i == 1500){
+    print(huc.large[i,]$label) # Progress update
+  } else { # don't print every huc name, way too many!
+    
+  } # end if-else statement
+
+  for (j in 1:l.length) { # begin j loop
+    if (lith_type[j] %in% crop_poly$class){
+      # Keep polygons of the desired lithology type (j)
+      # keep_poly <- crop_poly[crop_poly$class == lith_type[j]]
+      keep_poly <- crop_poly %>% filter(class == lith_type[j])
+
+      # Calculate the area covered by class type j in km2
+      area_covered <- if (length(expanse(keep_poly, unit = "km")) > 0) {
+        expanse(keep_poly, unit = "km")
+        } else {0}  # If a class doesn't exist in the HUC12, expanse() will return a blank instead of zero
+
+      # Calculate the total area of HUC i in km2
+      total_area <- expanse(huc.large[i], unit = "km") 
+
+      # Calculate the percent of HUC i covered by lithology type j
+      percent_area_covered <- (area_covered / total_area) * 100
+    
+      # Append the results to the result_df data frame
+      result_df <- rbind(result_df,
+                         data.frame(huc = huc.large[i]$label,
+                                    LithClass = lith_type[j],
+                                    PercentArea = percent_area_covered))
+      } else {
+      result_df <- rbind(result_df,
+                         data.frame(huc = huc.large[i]$label,
+                                    LithClass = lith_type[j],
+                                    PercentArea = 0))
+      }  # end if-else statement
+    } # end j loop
+  } # end i loop
+saveRDS(result_df, "./result_df_lith.RDS")
+```
+
+Look at output
+```{r}
+head(result_df)
+```
+
+Pivot wider and drop lithology classes with 0% cover
+```{r, echo=FALSE}
+lith.areas <- result_df %>% pivot_wider(., names_from = LithClass, values_from = PercentArea)
+view(lith.areas)
+any(rowSums(lith.areas[,-1]) > 100.1) # check to make sure that none of the percentages are over 100%
+# rowSums(lith.areas[,-1])
+any(colSums(lith.areas[,-1]) == 0)
+sums <- colSums(lith.areas[,-1])
+which(sums == 0)
+# lith.areas <- lith.areas[,-(unname(which(sums == 0))+1)]
+```
+
+Save to csv
+```{r}
+write.csv(lith.areas, "./Outputs_csv/lith_percentages_huc12.csv")
+lith.areas.L <- read.csv("./Outputs_csv/lith_percentages_huc12.csv", header = TRUE, row.names = 1)
+# colnames(lith.areas)[1] <- "huc12.id"
+```
+
+## Soil variables and elevation
+
+Load substrate rasters using the `terra` package:
+```{r}
+elev <- rast("./Intermediate/elev_crop_30m.tif") # same raster used to create small hucs
+
+stack <- rast(c("./Intermediate/clay_crop_225m.tif", 
+                "./Intermediate/sand_crop_225m.tif", 
+                "./Intermediate/silt_crop_225m.tif"))
+names(stack) <- c("clay","sand","silt")
+plot(stack)
+```
+
+### Zonal statistics
+
+Calculate the mean value of each variable within each site buffer:
+```{r}
+stack_z <- zonal(stack, huc.large, "mean", na.rm = TRUE, as.raster = FALSE, 
+                 # filename = "./Outputs_csv/Zonal_stats_soilL.csv", 
+                 exact=TRUE)
+
+elev_z <- zonal(elev, huc.large, "mean", na.rm=TRUE, as.raster=FALSE,
+                # filename="./Outputs_csv/Zonal_stats_elevL.csv",
+                exact=TRUE)
+huc12.z <- as.data.frame(cbind(huc = huc.large$label, stack_z, elev_z))
+
+write.csv(huc12.z, "./Outputs_csv/Zonal_stats_large.csv")
+```
+
+## Create points and append variables to shapefile
+
+```{r}
+huc.l.crop <- crop(huc.large, range.buff50)
+plot(huc.l.crop)
+
+points.L <- centroids(huc.l.crop, inside=T) %>% mutate(huc = label) %>% dplyr::select(huc)
+
+points.L.env <- points.L %>% 
+  left_join(., huc12.z, by="huc") %>% 
+  left_join(., lith.areas.L, by="huc") %>% 
+  left_join(., habitat.areas.L, by="huc") %>% 
+  dplyr::select(-Water)
+```
+
+
+```{r}
+names(points.L.env)
+names(points.L.env)[12:37] <- c("Barren",
+                                "LAc_NHardwd",
+                                "NAtl_CoastPlain_Hardwd",
+                                "LAc_NPineOak",
+                                "LAc_PineHemlockHardwd",
+                                "CAp_Dry_OakPine",
+                                "Ap_Hemlock_NHardwd",
+                                "Ac_LoElev_SpruceFirHardwd",
+                                "AcAp_Montane_SpruceFir",
+                                "CentAp_PineOak_Rocky_Wd",
+                                "NAtl_Coast_Plain_Maritime",
+                                "NAtl_Coast_Plain_Dune",
+                                "CentIntAp_FloodplainSys",
+                                "CentIntAp_RiparianSys",
+                                "LAc_FloodplainSys",
+                                "Bor_Acidic_PeatSys",
+                                "CentIntAp_SwampSys",
+                                "GulfAtl_CoastPlain_SwampSys",
+                                "GulfAtl_CoastPlain_TMarshSys",
+                                "LAc_ShrubHerb_WetlSys",
+                                "NCentInt_Wet_Flatwd",
+                                "LAc_SwampSys",
+                                "NeInt_PineBarrens",
+                                "AcAp_WdHeathKrummholz",
+                                "Bor_JackPineBlackSpruce",
+                                "AcAp_AlpineTundra")
+
+writeVector(points.L.env, "./biomod/input_huc12.shp", overwrite=T)
+```
+
+Shapefile of polygons to join with presence absence data:
+```{r}
+huc12.env <- huc.l.crop %>% st_as_sf(.) %>% 
+  mutate(huc = label) %>% 
+  left_join(., huc12.z, by="huc") %>% 
+  left_join(., lith.areas.L, by="huc") %>% 
+  left_join(., habitat.areas.L, by="huc") %>% 
+  dplyr::select(-Water, -label, -areasqkm, -huc12, -name) %>% 
+  vect(.)
+
+names(huc12.env)
+names(huc12.env)[12:37] <- c("Barren",
+                             "LAc_NHardwd",
+                            "NAtl_CoastPlain_Hardwd",
+                            "LAc_NPineOak",
+                            "LAc_PineHemlockHardwd",
+                            "CAp_Dry_OakPine",
+                            "Ap_Hemlock_NHardwd",
+                            "Ac_LoElev_SpruceFirHardwd",
+                            "AcAp_Montane_SpruceFir",
+                            "CentAp_PineOak_Rocky_Wd",
+                            "NAtl_Coast_Plain_Maritime",
+                            "NAtl_Coast_Plain_Dune",
+                            "CentIntAp_FloodplainSys",
+                            "CentIntAp_RiparianSys",
+                            "LAc_FloodplainSys",
+                            "Bor_Acidic_PeatSys",
+                            "CentIntAp_SwampSys",
+                            "GulfAtl_CoastPlain_SwampSys",
+                            "GulfAtl_CoastPlain_TMarshSys",
+                            "LAc_ShrubHerb_WetlSys",
+                            "NCentInt_Wet_Flatwd",
+                            "LAc_SwampSys",
+                            "NeInt_PineBarrens",
+                            "AcAp_WdHeathKrummholz",
+                            "Bor_JackPineBlackSpruce",
+                            "AcAp_AlpineTundra")
+
+writeVector(huc12.env, "./biomod/input_huc12_poly.shp", overwrite=T)
+```
+
+# Join HUC polygons with Bridle Shiner sites
+
+Read in bridle shiner data:
+```{r}
+curr <- st_read("./CurrentBridleShinerPoints.shp") 
+# %>% 
+#   filter(WaterBody != "Warren Hatchery Pond")
+hist <- st_read("./HistoricalBridleShinerPoints.shp") %>% 
+  filter(SiteHist != "Sebago Lake (general)") 
+# %>% 
+#   filter(Water_Body != "Sunday Pond")
+huc.large <- vect("./Inputs_vectors/large_hucs_intersect.shp")
+huc.small <- vect("./Inputs_vectors/small_hucs_intersect.shp")
+```
+
+## Map of survey points
+
+Join the Current and Historical points
+```{r}
+hist2 <- hist %>% # make column names the same as Current dataset
+  dplyr::rename(
+    WaterBody = Water_Body,
+    SiteName = Site_Name,
+    SiteCode = Site_code,
+    Mean_x = x,
+    Mean_y = y
+  ) %>% 
+  dplyr::relocate(State, .before = Mean_x) 
+```
+
+State and model boundaries
+```{r}
+me_bnd <- st_read("./biomodSDM/Maine_boundary.shp")
+nh_bnd <- st_read("./Inputs_raw/New_Hampshire_Boundary_poly.shp")
+model <- st_read("./Intermediate/Model_extent.shp")
+# huc6 <- vect("./biomodSDM/SacoMerrimackHUC6.shp") %>% project(., y = "epsg:26919")
+# marine <- vect("./Intermediate/Marine_habitats.shp") %>% project(., y = "epsg:26919")
+# huc6.x <- huc6 %>% 
+#   erase(., marine) %>%  # erase using saltwater coastline features
+#   st_as_sf(.)
+# st_write(huc6.x, "./biomodSDM/SacoMerrimackHUC6_clip.shp")
+huc6.x <- st_read("./biomodSDM/SacoMerrimackHUC6_clip.shp")
+```
+
+Combine points into one dataset:
+```{r}
+## Historically present:
+hist_map <- hist2
+hist_map$shape <- factor(
+  "Historical",
+  levels = c(
+    "Historical",
+    "Current"
+  )
+)
+hist_map$fill <- factor(
+  "Historical presence",
+  levels = c(
+    "Historical presence",
+    "Historical presence (likely misidentified)",
+    "Current absence",
+    "Current presence"
+  )
+)
+hist_map$color <- factor(
+  "No habitat survey",
+  levels = c(
+    "No habitat survey",
+    "Habitat survey"
+  )
+)
+hist_map[hist_map$hOccu == 1,]$fill <- "Historical presence"
+hist_map[hist_map$hOccu == -9999,]$fill <- "Historical presence (likely misidentified)"
+
+## Current data:
+curr_map <- curr
+curr_map$shape <- factor(
+  "Current",
+  levels = c(
+    "Historical",
+    "Current"
+  )
+)
+curr_map$fill <- factor(
+  "Current absence",
+  levels = c(
+    "Historical presence",
+    "Historical presence (likely misidentified)",
+    "Current absence",
+    "Current presence"
+  )
+)
+curr_map$color <- factor(
+  "No habitat survey",
+  levels = c(
+    "No habitat survey",
+    "Habitat survey"
+  )
+)
+curr_map[curr_map$cOccu == 1,]$fill <- "Current presence"
+curr_map[curr_map$cOccu == 0,]$fill <- "Current absence"
+hab <- curr %>% 
+  filter(State == "ME") %>% 
+  filter(SiteName != "CANCO") %>% 
+  dplyr::select(SiteName) %>% 
+  st_drop_geometry(.) %>% 
+  unique(.)
+hab.sites <- hab$SiteName
+curr_map[which(curr_map$SiteName %in% hab.sites),]$color <- "Habitat survey"
+
+
+curr_map2 <- curr_map %>% dplyr::select(WaterBody, SiteName, Mean_x, Mean_y, shape, fill, color) %>% st_drop_geometry(.)
+hist_map2 <- hist_map %>% dplyr::select(WaterBody, SiteName, Mean_x, Mean_y, shape, fill, color) %>% st_drop_geometry(.)
+
+curr_map2 <- curr_map %>% dplyr::select(-SiteHist, -CStatus, -cOccu, -shape) %>% st_drop_geometry(.)
+hist_map2 <- hist_map %>% dplyr::select(-SiteHist, -HStatus, -hOccu, -shape) %>% st_drop_geometry(.)
+
+all.points <- full_join(hist_map2,
+                        curr_map2,
+                        by = c("WaterBody","State", "Mean_x", "Mean_y","SiteName", "SiteCode", "shape", "fill", "color")) %>%
+  st_as_sf(
+            .,
+            coords = c("Mean_x", "Mean_y"),
+            crs = 26919,
+            # NAD-83/UTM Zone 19N
+            remove = FALSE,
+            agr = "identity" # columns (attributes) uniquely identify the geometry of each point
+          )
+all.points <- full_join(hist_map2,
+                        curr_map2,
+                        by = c("Source", "Year", "Date", "WBType",
+                          "WaterBody","State", "Mean_x", "Mean_y","SiteName", "SiteCode","BS_Pres","PointType", "fill", "color")) %>% rename(HabitatSurvey = color, Occupancy = fill) %>% relocate(c(Occupancy, HabitatSurvey)) %>% relocate(Source, .after = PointType)
+all.points[all.points$Year == 9999,]$Year <- "Unknown"
+all.points[all.points$Year == -9999,]$Year <- "Unknown"
+all.points[all.points$Occupancy == "Historical presence" & all.points$State == "NH",]$SiteName <- all.points[all.points$Occupancy == "Historical presence" & all.points$State == "NH",]$SiteCode
+
+all.points2 <- all.points %>% dplyr::select(-SiteCode) %>% rename(SiteHistory = BS_Pres)
+all.points2[all.points2$SiteHistory == "Historical" & all.points2$State == "ME" & all.points2$WBType == "StreamRiver" & !is.na(all.points2$SiteName),]$SiteHistory <- "Historically present within river/stream reach"
+all.points2[all.points2$SiteHistory == "Historic record, likely misidentified or miscoded",]$SiteHistory <- "Historical record, likely misidentified or miscoded"
+write.csv(all.points2, "./Outputs_csv/AllBridleShinerPoints.csv", row.names = FALSE)
+
+
+
+
+
+st_write(all.points, "./biomod/all_survey_points.shp")
+
+
+
+
+
+curr <- st_read("./CurrentBridleShinerPoints.shp")
+hist <- st_read("./HistoricalBridleShinerPoints.shp")
+
+curr.df <- curr %>% st_drop_geometry(.) %>% dplyr::select(-SiteHist)
+hist.df <- hist %>% st_drop_geometry(.) %>% dplyr::select(-SiteHist)
+```
+
+```{r}
+introduced <- data.frame(
+  x = st_coordinates(all.points[all.points$WaterBody == "Warren Hatchery Pond",])[,1],  # Replace with the specific site's x-coordinate
+  y = st_coordinates(all.points[all.points$WaterBody == "Warren Hatchery Pond",])[,2],  # Replace with the specific site's y-coordinate
+  label = "A"  # Replace with your desired label
+)
+```
+
+```{r fig.height=8}
+g1 <- ggplot() +
+  theme_classic() +
+  theme(axis.line = element_line(color = "grey10"),
+        axis.ticks.length = unit(0.2,"cm"),
+        panel.border = element_rect(color = "black", fill = NA),
+        legend.position = "none") +
+  geom_sf(data = model, fill = "lightgray", col = NA) +
+  geom_sf(data = me_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  geom_sf(data = nh_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  geom_sf(data = huc6.x, fill = NA, col = "#9c179e", linewidth = 0.2) +
+  geom_point(data = all.points,
+             aes(x = st_coordinates(all.points)[,1],
+                 y = st_coordinates(all.points)[,2],
+                 shape = shape, # shape varies by time period
+                 fill = fill, # fill varies by occupancy status
+                 color = color, # outline color varies by habitat survey (yes/no)
+                 cex = shape # size varies by shape (squares are larger)
+                 ),
+             stroke = 0.4) +
+  coord_sf(datum = st_crs(all.points)) +
+  xlab("Easting") +
+  ylab("Northing") +
+  scale_shape_manual(values = c("Historical" = 22, "Current" = 21)) + 
+  scale_size_manual(values = c("Historical" = 4.4, "Current" = 3)) +
+  scale_fill_manual(values = c("Historical presence" = "#0d088766",
+    "Historical presence (likely misidentified)" = "white",
+    "Current absence" = "white",
+    "Current presence" = "#0d0887")) +
+  scale_color_manual(values = c(
+    "No habitat survey" = "black",
+    "Habitat survey" = "#ed7953")) +
+  ggspatial::annotation_north_arrow(
+    location = "tl",
+    style = north_arrow_orienteering,
+    height = unit(1, "cm"),
+    width = unit(1, "cm")
+  ) +
+  ggspatial::annotation_scale(location = "br") +
+  geom_text(data = introduced,
+            aes(x = x, y = y, label = label),
+            nudge_x = 8000, nudge_y = 8000,  # Adjust to position the label
+            size = 4, color = "black")  # Customize size and color
+g1
+ggsave("./biomod/Figures/Figure1.png", g1, bg = "white", dpi = 600)
+```
+
+## Small HUCs
+
+Current points:
+```{r}
+huc.small <- st_as_sf(huc.small)
+
+hucS_join_c <- st_join(huc.small, curr, join = st_intersects)
+
+hucS_pa_c <- hucS_join_c %>%
+  mutate(huc = label) %>%
+  dplyr::select(-cat, -value, -label, -areasqkm, -FID_1, -Source, -Year, -Date,
+                -WBType, -WaterBody, -State, -Mean_x, -Mean_y, -SiteName,
+                -SiteCode, -SiteHist, -BS_Pres, -CStatus, -PointType) %>%
+  group_by(huc) %>%
+  summarise(cOccu = max(cOccu, na.rm = T), .groups='drop')
+
+hucS_pa_c[hucS_pa_c$huc == "huc1658",]$cOccu <- -999 # Warren Hatchery Pond, introduced
+hucS_pa_c[hucS_pa_c$huc == "huc0124",]$cOccu <- -999 # Sunday Pond, likely misidentified
+hucS_pa_c[hucS_pa_c$cOccu == -Inf,]$cOccu <- -999 # to check in ArcGIS
+hucS_pa_c <- vect(hucS_pa_c)
+writeVector(hucS_pa_c, "./biomod/hucS_pa_curr.shp", overwrite=T)
+
+hucS_pa_c <- st_read("./biomod/hucS_pa_curr.shp")
+hucS_pa_c[hucS_pa_c$cOccu == -999,]$cOccu <- NA
+summary(hucS_pa_c$cOccu) # should be 1639 NA's
+```
+
+Historical points:
+```{r}
+hucS_join_h <- st_join(huc.small, hist, join = st_contains) # not working for all points for some reason, selected in ArcGIS Pro
+
+hucS_pa_h <- hucS_join_h %>%
+  mutate(huc = label) %>%
+  dplyr::select(-cat, -value, -label, -areasqkm, -FID_1, -Source, -Year, -Date,
+                -WBType, -Water_Body, -State, -x, -y, -Site_Name,
+                -Site_code, -SiteHist, -BS_Pres, -HStatus, -PointType) %>%
+  group_by(huc) %>%
+  summarise(hOccu = max(hOccu, na.rm=T), .groups='drop')
+hucS_pa_h[hucS_pa_h$huc == "huc1658",]$hOccu <- -999 # Warren Hatchery Pond, introduced
+hucS_pa_h[hucS_pa_h$huc == "huc0124",]$hOccu <- -999 # Sunday Pond, likely misidentified
+hucS_pa_h[hucS_pa_h$hOccu == -Inf,]$hOccu <- -999 # so Arc reads as NA, not 0
+```
+
+For lakes with unknown survey locations, use poly of whole lake to select HUCs (all of these fit within one HUC except for Winnisquam)
+```{r}
+# lakes <- vect("./NHD/NHD_H_New_Hampshire_State_GDB.gdb", layer="NHDWaterbody") %>%
+#   filter(gnis_name == "Lake Winnisquam") %>%
+#   project(., y=crs(hucS_pa_h)) %>%
+#   fillHoles(.) %>% st_as_sf(.)
+#
+# hucS_pa_h <- st_as_sf(hucS_pa_h)
+#
+# join <- st_join(hucS_pa_h, lakes, join = st_intersects)
+
+hucS_pa_h[hucS_pa_h$huc == "huc2497" |
+            hucS_pa_h$huc == "huc2582" |
+            hucS_pa_h$huc == "huc2572" |
+            hucS_pa_h$huc == "huc2615" |
+            hucS_pa_h$huc == "huc2612" |
+            hucS_pa_h$huc == "huc2584",]$hOccu <- 1
+
+hucS_pa_h <- vect(hucS_pa_h)
+writeVector(hucS_pa_h, "./biomod/hucS_pa_hist.shp", overwrite=T) # manually select intersecting hucs in Arc since it's not working here
+hucS_pa_h <- st_read("./biomod/hucS_pa_hist.shp")
+hucS_pa_h[hucS_pa_h$hOccu == -999,]$hOccu <- NA
+summary(hucS_pa_h$hOccu) # should be 1688 NA's
+```
+
+## Large HUCs (HUC12)
+
+Current points:
+```{r}
+huc.large <- st_as_sf(huc.large)
+
+huc12_join_c <- st_join(huc.large, curr, join = st_contains)
+
+huc12_pa_c <- huc12_join_c %>%
+  mutate(huc = label) %>%
+  dplyr::select(-huc12, -name, -label, -areasqkm, -Source, -Year, -Date,
+                -WBType, -WaterBody, -State, -Mean_x, -Mean_y, -SiteName,
+                -SiteCode, -SiteHist, -BS_Pres, -CStatus, -PointType) %>%
+  group_by(huc) %>%
+  summarise(cOccu = max(cOccu, na.rm=T), .groups='drop')
+
+huc12_pa_c[huc12_pa_c$cOccu == -Inf,]$cOccu <- -999
+huc12_pa_c[huc12_pa_c$huc == "huc12-564",]$cOccu <- -999 # Warren Hatchery Pond, introduced
+huc12_pa_c[huc12_pa_c$huc == "huc12-435",]$cOccu <- -999 # Sunday Pond, likely misidentified
+
+huc12_pa_c <- vect(huc12_pa_c) # terra doesn't shorten column names
+
+writeVector(huc12_pa_c, "./biomod/huc12_pa_curr.shp", overwrite=T)
+huc12_pa_c <- st_read("./biomod/huc12_pa_curr.shp")
+huc12_pa_c[huc12_pa_c$cOccu == -999,]$cOccu <- NA
+summary(huc12_pa_c$cOccu) # should be 394 NA's
+```
+
+Historical points:
+```{r}
+huc12_join_h <- st_join(huc.large, hist, join = st_contains) # something wrong with some of these points, sf doesn't seem to recognize them but ArcGIS does
+
+huc12_pa_h <- huc12_join_h %>%
+  mutate(huc = label) %>%
+  dplyr::select(-huc12, -name, -label, -areasqkm, -Source, -Year, -Date,
+                -WBType, -Water_Body, -State, -x, -y, -Site_Name,
+                -Site_code, -SiteHist, -BS_Pres, -HStatus, -PointType) %>%
+  group_by(huc) %>%
+  summarise(hOccu = max(hOccu, na.rm=T), .groups='drop')
+
+
+huc12_pa_h[huc12_pa_h$hOccu == -Inf,]$hOccu <- -999
+huc12_pa_h[huc12_pa_h$huc == "huc12-564",]$hOccu <- -999 # Warren Hatchery Pond, introduced
+huc12_pa_h[huc12_pa_h$huc == "huc12-435",]$hOccu <- -999 # Sunday Pond
+
+huc12_pa_h <- vect(huc12_pa_h) # terra doesn't shorten column names
+
+writeVector(huc12_pa_h, "./biomod/huc12_pa_hist.shp", overwrite=T)
+huc12_pa_h <- st_read("./biomod/huc12_pa_hist.shp")
+huc12_pa_h[huc12_pa_h$hOccu == -999,]$hOccu <- NA
+summary(huc12_pa_h$hOccu) # should be 427 NA's
+```
+
+# Join presence-absence HUC values with environmental variables and HUC centroids
+
+## Small HUCs
+
+Current
+```{r}
+points.S.env <- st_read("./biomod/input_small_hucs.shp")
+
+hucS_pa_c.df <- as.data.frame(st_drop_geometry(hucS_pa_c))
+# points.S.env <- st_as_sf(points.S.env)
+points.S.pa.c <- left_join(points.S.env, hucS_pa_c.df, by="huc") %>% vect(.)
+writeVector(points.S.pa.c, "./biomod/input_points_S_pa_curr.shp", overwrite = TRUE)
+points.S.pa.c$cOccu <- as.factor(points.S.pa.c$cOccu)
+summary(points.S.pa.c$cOccu)
+```
+
+Historical
+```{r}
+hucS_pa_h.df <- as.data.frame(st_drop_geometry(hucS_pa_h))
+points.S.pa.h <- left_join(points.S.env, hucS_pa_h.df, by="huc") %>% vect(.)
+writeVector(points.S.pa.h, "./biomod/input_points_S_pa_hist.shp", overwrite = TRUE)
+points.S.pa.h$hOccu <- as.factor(points.S.pa.h$hOccu)
+summary(points.S.pa.h$hOccu)
+```
+
+## Large HUCs (HUC12)
+
+Current:
+```{r}
+points.L.env <- st_read("./biomod/input_huc12.shp")
+
+huc12_pa_c.df <- as.data.frame(st_drop_geometry(huc12_pa_c))
+points.L.env <- st_as_sf(points.L.env)
+points.L.pa.c <- left_join(points.L.env, huc12_pa_c.df, by="huc") %>% vect(.)
+writeVector(points.L.pa.c, "./biomod/input_points_L_pa_curr.shp", overwrite = TRUE)
+points.L.pa.c$cOccu <- as.factor(points.L.pa.c$cOccu)
+summary(points.L.pa.c$cOccu)
+```
+
+Historical:
+```{r}
+huc12_pa_h.df <- as.data.frame(st_drop_geometry(huc12_pa_h))
+points.L.pa.h <- left_join(points.L.env, huc12_pa_h.df, by="huc") %>% vect(.)
+writeVector(points.L.pa.h, "./biomod/input_points_L_pa_hist.shp", overwrite=T)
+points.L.pa.h$hOccu <- as.factor(points.L.pa.h$hOccu)
+summary(points.L.pa.h$hOccu)
+```
+
+
+# Old
+
+*Load the six intermediate rasters (`elev_huc.tif`, `clay_huc.tif`, `sand_huc.tif`, `silt_huc.tif`, `pH_huc.tif`, and `slope_huc.tif`) and the `HUC12_crop_sw` shapefile into ArcGIS Pro. Run the "Zonal Statistics (Spatial Analyst Tool)".*
+
+**"Parameters" settings:**
+ * Input Raster or Feature Zone Data: `HUC12_crop_sw.shp`
+ * Zone Field: `huc12`
+ * Input Value Raster: `clay_huc.tif` *(repeat for each raster)*
+ * Output Raster: `clay_zonal.tif` *(save in "./Intermediate/" folder)*
+ * Statistics Type: `Mean`
+ * Calculate Circular Statistics: *unchecked*
+ * Ignore NoData in Calculations: *checked*
+ * Process as Multidimensional: *unchecked*
+
+**"Environments" settings:**
+ * Output Coordinate System: `NAD_1983_UTM_ZONE_19N`
+ * Geographic Transformations: `NA`
+ * Processing Extent: Same as Layer `HUC12_crop_sw.shp`
+ * Parallel Processing: *default settings*
+ * Raster Analysis:
+   - Cell Size: Same as layer `clay_huc.tif`
+   - Cell Size Projection Method: `Convert units`
+   - Mask: `HUC12_crop_sw.shp`
+   - Snap Raster: `clay_huc.tif`
+ * Geodatabase: *default settings*
+ * Raster storage: *default settings*
+ 
+ *Run the "Surface Parameters (Spatial Analyst Tool)".*
+
+**"Parameters" settings:**
+ * Input surface raster: `elev_huc.tif`
+ * Output raster: `slope_huc.tif` *(save in "./Intermediate/" folder)*
+ * Input analysis mask: `HUC12_crop_sw.shp`
+ * Parameter type: `Slope`
+ * Local surface type: `Quadratic` *(default)*
+ * Neighborhood distance: *Keep the default value (the input raster cell size (30m), resulting in a 3 by 3 neighborhood).*
+ * Use adaptive neighborhood: *unchecked*
+ * Z unit: `Meter` *(default)*
+ * Slope measurement: `Degree` *(default)*
+
+**"Environments" settings:**
+ * Output Coordinate System: `NAD_1983_UTM_ZONE_19N`
+ * Geographic Transformations: `NA`
+ * Processing Extent: Same as Layer `HUC12_crop_sw.shp`
+ * Parallel Processing: *default settings*
+ * Raster Analysis:
+   - Cell Size: Same as layer `elev_huc.tif`
+   - Cell Size Projection Method: `Convert units`
+   - Mask: `HUC12_crop_sw.shp`
+   - Snap Raster: `elev_huc.tif`
+ * Geodatabase: *default settings*
+ * Raster storage: *default settings*
+ Make raster of percent covered for each habitat type within each HUC12
+```{r}
+# huc.habs <- hucs %>% select(huc12.id) %>% merge(., habitat.areas, by = "huc12.id") %>% select(-huc12.id)
+# 
+# rows <- nrow(agg_raster)
+# cols <- ncol(agg_raster)
+# 
+# for (i in 1:ncol(huc.habs)){
+# 
+#   hab <- huc.habs %>% select(names(huc.habs[[i]]))
+#   r <- rast(hab, ncols = cols, nrows = rows)
+#   z <- rasterize(hab, r, field = names(huc.habs[[i]]))
+#   z_p <- project(z, y = "epsg:26919")
+#   writeRaster(z_p, filename = paste0(paste0(paste0("./huc12_rasters/", i),
+#                                           names(hab[[i]])), "_bps.tif"),
+#               overwrite = TRUE)
+#  }
+```
+
+Make raster of percent covered for each habitat type within each HUC12:
+```{r}
+# huc.lith <- hucs %>% select(huc12.id) %>% merge(., lith.areas, by = "huc12.id") %>% select(-huc12.id)
+# 
+# rows <- nrow(agg_raster)
+# cols <- ncol(agg_raster)
+# 
+# for (i in 1:ncol(huc.lith)){
+# 
+#   lith <- huc.lith %>% select(names(huc.lith[[i]]))
+#   r <- rast(lith, ncols = cols, nrows = rows)
+#   z <- rasterize(lith, r, field = names(huc.lith[[i]]))
+#   z_p <- project(z, y = "epsg:26919")
+#   writeRaster(z_p, filename = paste0(paste0(paste0("./huc12_rasters/", i),
+#                                           names(lith[[i]])), "_lith.tif"),
+#               overwrite = TRUE)
+#  }
+```
+
+Save png of map with HUC12 boundaries
+```{r}
+# png(filename="./LANDFIRE_capsites.png", width = 2500, height = 1440, pointsize = 32)
+# # ggplot() + geom_spatraster(data=biophys_ME, na.rm = T, show.legend = F) + geom_sf(data = towns.t, colour = "black", fill = NA) + theme_minimal()
+# terra::plot(biophys_ME)
+# terra::plot(hucs, add = T)
+# dev.off()
+```
+
+Crop HUC shapefile to LANDFIRE raster (to get rid of NA values along Canadian border)
+```{r}
+# huc_crop <- crop(hucs, agg_raster) # deletes some HUCs for some reason, performed in ArcGIS Pro
+# writeVector(huc_crop, "./Data_inputs/HUC12_crop.shp")
+# huc_crop <- vect("./Data_inputs/HUC12_crop.shp") # to terra SpatVector
+```
+
+Plot HUCs
+```{r}
+# require(ggplot2)
+# ggplot(hucs) +
+#   geom_sf() +
+#   theme_minimal()
+```
+
+Load shapefile of HUC12s, change projection to UTM Zone 19N to match raster:
+```{r}
+#hucs <- st_read("./Data_inputs/MENH_HUC12.shp")
+# hucs <- vect("./Data_inputs/HUC12_crop_sw.shp")
+# hucs <- project(hucs, y = "epsg:26919") # EPSG for NAD83 / UTM Zone 19N
+# plot(hucs)
+```
+
+Aggregate raster cells by cell value to save processing time:
+```{r}
+# original_res <- res(lith) # original cell size (90m x 90m)
+# target_res <- c(3,3) # larger cell size (90m x 90m)
+# 
+# agg_raster <- aggregate(lith,
+#                         fact = target_res,
+#                         na.rm = TRUE,
+#                         fun = "modal", # nearest-neighbor resampling keeps categorical values intact
+#                         cores = 12)
+# lev <- cats(agg_raster)
+# lev_df <- as.data.frame(lev[[1]]) # Make raster attribute table into a data frame
+# levels(agg_raster) <- lev_df
+# activeCat(agg_raster) <- "class"
+# 
+# plot(agg_raster)
+```
+
+Save raster and reload
+```{r}
+#writeRaster(agg_raster, "./Intermediate/lith_MENH_sw_90m.tif", overwrite = TRUE)
+# agg_raster <- raster("./Intermediate/lith_MENH_sw_90m.tif", RAT = TRUE) # Load in raster package to get attribute table
+# agg_raster <- rast(agg_raster) # Convert back to terra SpatRaster
+# 
+# 
+# activeCat(agg_raster) <- "class" # set active category to habitat name
+# lev <- cats(agg_raster)
+# lev_df <- as.data.frame(lev[[1]]) # Make raster attribute table into a data frame
+# plot(agg_raster) # check
+```
+
+Load intermediary rasters:
+```{r}
+# catch <- rast("./CatchmentPosition_sw.tif")
+# coast <- rast("./CoastDistance_sw.tif")
+# marine <- rast("./MarineLimit_sw.tif")
+```
+
+Resample rasters to match the model extent raster:
+```{r}
+# resample <- list(catch,coast,lith,marine)
+# names <- c("catchment","coast","marine")
+# for (i in 1:length(resample)){
+#   names(resample[[i]]) <- names[i]
+#   lyr <- resample(x = resample[[i]], y = model, method = "near",
+#                   filename = paste0(paste0("./SDM_inputs/", names(resample[[i]])), ".tif"),
+#                   overwrite = TRUE)
+# }
+```
+
+Load land cover rasters
+```{r}
+files <- list.files(path = "./huc12_rasters/",
+                      pattern = "tif",
+                      all.files = TRUE,
+                      full.names = TRUE,
+                      include.dirs = FALSE)
+land <- rast(files)
+names(land)
+names(land) <- c("10_AcAp_Montane_Spruce-Fir",
+                 "11_CentAp_Pine-Oak_Rocky_Wd",
+                 "12_NAtl_Coast_Plain_Maritime",
+                 "13_NAtl_Coast_Plain_Dune",
+                 "14_CentIntAp_FloodplainSys",
+                 "15_CentIntAp_RiparianSys",
+                 "16_LAc_FloodplainSys",
+                 "17_Bor_Acidic_PeatSys",
+                 "18_CentIntAp_SwampSys",
+                 "19_GulfAtl_CoastPlain_SwampSys",
+                 "Glacial_till_coarse",
+                 "01_water",
+                 "02_Barren",
+                 "Glacial_lake_sed_fine",
+                 "20_GulfAtl_CoastPlain_TMarshSys",
+                 "21_LAc_Shrub-Herb_WetlSys",
+                 "22_NCentInt_Wet_Flatwd",
+                 "23_LAc_SwampSys",
+                 "24_NeInt_PineBarrens",
+                 "25_AcAp_WdHeath-Krummholz",
+                 "26_Bor_JackPine-BlackSpruce",
+                 "27_AcAp_AlpineTundra",
+                 "03_LAc_NHardwd",
+                 "Glacial_outwash_coarse",
+                 "04_NAtl_CoastPlain_Hardwd",
+                 "Alluvium_coastal_sed_fine",
+                 "05_LAc_NPine-Oak",
+                 "Coastal_sed_coarse",
+                 "06_LAc_Pine-Hemlock-Hardwd",
+                 "07_CAp_Dry_Oak-Pine",
+                 "08_Ap_Hemlock_NHardwd",
+                 "09_Ac_LoElev_SpruceFirHardwd")
+```
+
+Remove land cover classes with no area
+```{r}
+# land <- terra::subset(land, subset = -c(24,26))
+# names(land)
+```
+
+Check rasters
+```{r}
+par(mfrow=c(3,3))
+plot(land[[1:9]])
+plot(land[[10:18]])
+plot(land[[19:27]])
+plot(land[[28:32]])
+```
+
+Resample land cover rasters and crop to model extent
+```{r}
+model <- rast("./Data_inputs/ExtentMask_sw.tif")
+
+land_disagg <- disagg(land, fact = 3, method = "near") # disaggregate cells back to 30m x 30m
+
+land_r <- resample(land_disagg, model, method = "near") # resample to snap to template raster cells
+
+land_crop <- crop(land_r, ext(model)) # Crop to model extent
+
+land_sw <- terra::mask(land_crop, model) # Mask to shape of model extent (clip HUCs)
+
+plot(land_sw[[1]])
+```
+
+Save resampled land cover rasters:
+```{r}
+for (i in 1:length(names(land_sw))){
+  writeRaster(land_sw[[i]], filename = paste0(paste0("./SDM_inputs/resamp_",
+                                          names(land_sw[[i]])), "_30m.tif"),
+              overwrite = TRUE)}
+```
+
+
+Load substrate rasters using the `terra` package:
+```{r}
+elev <- rast("./Data_inputs/Elevation_MENH_30m.tif") # different extent
+clay <- rast("./Data_inputs/clay_19N.tif")
+sand <- rast("./Data_inputs/SandContent_19N.tif")
+silt <- rast("./Data_inputs/SiltContent_19N.tif")
+soil.ph <- rast("./Data_inputs/SoilpH_19N.tif")
+
+stack <- rast(c("./Data_inputs/clay_19N.tif", "./Data_inputs/SandContent_19N.tif", "./Data_inputs/SiltContent_19N.tif", "./Data_inputs/SoilpH_19N.tif"))
+names(stack) <- c("clay","sand","silt","ph")
+plot(stack)
+```
+
+Project to NAD83 UTM Zone 19N:
+```{r}
+stack_p <- project(stack, y = "epsg:26919")
+elev_p <- project(elev, y = "epsg:26919")
+```
+
+Crop to outline of HUC12s:
+```{r}
+elev_crop <- crop(elev_p, hucs)
+elev_huc <- mask(elev_crop, hucs)
+plot(elev_huc)
+stack_crop <- crop(stack_p, hucs)
+stack_huc <- mask(stack_crop, hucs)
+plot(stack_huc)
+```
+
+Save intermediate rasters
+```{r}
+# writeRaster(elev_huc, "./Intermediate/elev_huc.tif", overwrite =TRUE)
+# writeRaster(stack_huc[[1]], "./Intermediate/clay_huc.tif", overwrite = T)
+# writeRaster(stack_huc[[2]], "./Intermediate/sand_huc.tif", overwrite = T)
+# writeRaster(stack_huc[[3]], "./Intermediate/silt_huc.tif", overwrite = T)
+# writeRaster(stack_huc[[4]], "./Intermediate/pH_huc.tif", overwrite = T)
+```
+
+Generate slope raster:
+```{r}
+slope_huc <- terrain(elev_huc, v="slope", neighbors=8, unit="degrees") # queen case
+plot(slope_huc)
+```
+
+
+Run zonal statistics:
+```{r}
+elev_z <- zonal(elev_huc, hucs, "mean", na.rm = TRUE, as.raster = TRUE)
+plot(elev_z)
+```
+```{r}
+slope_z <- zonal(slope_huc, hucs, "mean", na.rm = TRUE, as.raster = TRUE)
+plot(slope_z)
+```
+
+```{r}
+stack_z <- zonal(stack_huc, hucs, "mean", na.rm = TRUE, as.raster = TRUE)
+plot(stack_z)
+```
+
+Save zonal statistics rasters:
+```{r}
+writeRaster(stack_z$clay, "./Intermediate/clay_zonal.tif", overwrite = TRUE)
+writeRaster(stack_z$silt, "./Intermediate/silt_zonal.tif", overwrite = TRUE)
+writeRaster(stack_z$sand, "./Intermediate/sand_zonal.tif", overwrite = TRUE)
+writeRaster(stack_z$ph, "./Intermediate/pH_zonal.tif", overwrite = TRUE)
+writeRaster(elev_z, "./Intermediate/elev_zonal.tif", overwrite = TRUE)
+writeRaster(slope_z, "./Intermediate/slope_zonal.tif", overwrite = TRUE)
+```
+
+
+Resample and crop to species distribution model extent:
+```{r}
+model <- rast("./Data_inputs/ExtentMask_sw.tif")
+stack_r <- resample(stack_z, model, method = "near")
+stack_crop <- crop(stack_r, ext(model))
+stack_sw <- mask(stack_crop, model)
+plot(stack_sw)
+writeRaster(stack_sw$clay, "./SDM_inputs/clay.tif", overwrite = TRUE) # save raster
+writeRaster(stack_sw$silt, "./SDM_inputs/silt.tif", overwrite = TRUE) # save raster
+writeRaster(stack_sw$sand, "./SDM_inputs/sand.tif", overwrite = TRUE) # save raster
+writeRaster(stack_sw$ph, "./SDM_inputs/pH.tif", overwrite = TRUE) # save raster
+
+elev_r <- resample(elev_z, model, method = "near")
+elev_crop <- crop(elev_r, ext(model)) 
+elev_sw <- terra::mask(elev_crop, model) # Mask to shape of model extent
+plot(elev_sw)
+writeRaster(elev_sw, "./SDM_inputs/elev.tif", overwrite = TRUE) # save raster
+
+slope_r <- resample(slope_z, model, method = "near")
+slope_crop <- crop(slope_r, ext(model)) # Crop to extent of HUC polygon layer
+slope_sw <- terra::mask(slope_crop, model) # Mask to shape of model extent
+plot(slope_sw)
+writeRaster(slope_sw, "./SDM_inputs/slope.tif", overwrite = TRUE) # save raster
+```
+
+Load intermediary rasters:
+```{r}
+# catch <- rast("./CatchmentPosition_sw.tif")
+# coast <- rast("./CoastDistance_sw.tif")
+# marine <- rast("./MarineLimit_sw.tif")
+```
+
+Resample rasters to match the model extent raster:
+```{r}
+# resample <- list(catch,coast,lith,marine)
+# names <- c("catchment","coast","marine")
+# for (i in 1:length(resample)){
+#   names(resample[[i]]) <- names[i]
+#   lyr <- resample(x = resample[[i]], y = model, method = "near",
+#                   filename = paste0(paste0("./SDM_inputs/", names(resample[[i]])), ".tif"),
+#                   overwrite = TRUE)
+# }
+```
+
+Crop out interior of lakes/ponds 
+
+*No depth data for Maine waterbodies, but we need to exclude deepwater habitats from the model. A 500m interior buffer along lake and pond shorelines will retain the shallow areas of smaller ponds and exclude the deepest parts of large lakes.*
+
+Raster to polygons:
+```{r}
+# catchment <- rast("./SDM_inputs/catchment.tif")
+# catch_poly <- terra::as.polygons(catchment, aggregate = TRUE, values = FALSE)
+# writeVector(catch_poly, "./Intermediate/catch_poly.shp")
+```
+
+Plot polygons:
+```{r}
+# ggplot() +
+#   geom_spatvector(data = catch_poly, fill = "lightblue") +
+#   theme_minimal()
+```
+
+Generate interior buffer in ArcGIS Pro
+
+*Equivalent to `terra::buffer(catch_poly, width = -500)`, but this keeps crashing R. Use "Pairwise Buffer (Analysis Tools)" tool to generate buffer.*
+
+**"Parameters" settings:**
+ * Input Features: `catch_poly.shp`
+ * Output Feature Class: `catch_buff500.shp` *(save in "./Intermediate/" folder)*
+ * Distance [value or field]: `Linear Unit`, `-500 Meters`
+ * Method: `Planar` *(default)*
+ * Dissolve Type: `Dissolve all output features into a single feature`
+ * Maximum Offset Deviation: `0 Meters` *(default)*
+
+**"Environments" settings:**
+ * Output Coordinate System: `NAD_1983_UTM_ZONE_19N`
+ * Geographic Transformations: `NA`
+ * Processing Extent: Same as Layer `catch_poly.shp`
+ * Parallel Processing: *default settings*
+ * Geodatabase Advanced: *default settings*
+ * XY Values: *default settings*
+ * M Values: *default settings*
+ * Z Values: *default settings*
+
+Load buffer:
+```{r}
+catch_buff <- vect("./Intermediate/catch_buff500.shp")
+```
+
+Plot buffer:
+```{r}
+# xlim <- c(360000, 400000)
+# ylim <- c(4840000, 4880000)
+# plot(catch_poly, col = "lightblue", xlim = xlim, ylim = ylim) # zoomed in
+# plot(catch_buff, col = "red", xlim = xlim, ylim = ylim, add = TRUE)
+```
+
+Rasterize interior buffer:
+```{r}
+# catch_buff_rast <- rasterize(catch_buff, model) # rasterize using model raster as template
+```
+
+If-else statement to remove interior cells within 500m buffer:
+```{r}
+# catch_ifel <- ifel(catch_buff_rast == 1, NA, catchment) 
+# plot(catch_ifel)
+# plot(catch_ifel, xlim = xlim, ylim = ylim)
+# 
+# writeRaster(catch_ifel, "./SDM_inputs/catchment_500.tif")
+```
+
+Stack resampled rasters:
+```{r}
+# stack_num <- rast(c("./Intermediate/canopy_resamp.tif", # these are all continuous variables
+#                 "./Intermediate/clay_resamp.tif", 
+#                 "./Intermediate/elev_resamp.tif",
+#                 "./Intermediate/sand_resamp.tif", 
+#                 "./Intermediate/silt_resamp.tif"))
+# names(stack_num) <- c("canopy","clay","elevation", "sand", "silt")
+# plot(stack_num)
+```
+
+```{r}
+# snap <- rast("./SnapRaster_60km_300m.tif") 
+
+# stack_r <- resample(stack_p, snap, method = "bilinear") # bilinear interpolation of continuous values
+```
+
+```{r}
+# mass.sf <- st_as_sf(mass) %>% st_union(.) %>% st_as_sf(.)
+# plot(mass.sf[1])
+
+# estu <- vect("./Inputs_raw/MA_shapefile_wetlands/MA_Wetlands.shp") 
+# # ma.bnd <- st_read("./Inputs_raw/MA_boundary.shp") %>% st_transform(.,crs=26919)
+# estu <- estu[which(grepl("^E", estu$ATTRIBUTE))] %>% project(., y="epsg:26919") 
+# # estu <- estu[mass.sf,]
+# nh.bnd <- vect("./Inputs_raw/New_Hampshire_Boundary_poly.shp") %>% project(., y="epsg:26919")
+
+# estu.ma <- erase(estu, nh.bnd) 
+# plot(estu.ma)
+# writeVector(estu.ma, "./Intermediate/estu_ma.shp", overwrite=T)
+# estu.sf <- st_as_sf(estu.ma) %>% st_union(.) %>% st_as_sf(.)
+
+
+# mass2 <- dplyr::bind_rows(mass.sf, estu.sf) %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
+# plot(mass2)
+# writeVector(mass2,"Intermediate/mass_outline_estu2.shp", overwrite=T)
+# 
+# 
+# plot(estu["WETLAND_TY"])
+```
+
+
+```{r}
+# # Add shape labels directly in the data as factors
+# hist_q$shape <- factor(
+#   "Historical presence (likely misidentified)",
+#   levels = c(
+#     "Historical presence (likely misidentified)",
+#     "Historical presence",
+#     "Current absence",
+#     "Current absence + habitat survey",
+#     "Current presence",
+#     "Current presence + habitat survey"
+#   )
+# )
+# hist_pres$shape <- factor("Historical presence", levels = levels(hist_q$shape))
+# curr_abs$shape <- factor("Current absence", levels = levels(hist_q$shape))
+# hab_abs$shape <- factor("Current absence + habitat survey", levels = levels(hist_q$shape))
+# curr_pres$shape <- factor("Current presence", levels = levels(hist_q$shape))
+# hab_pres$shape <- factor("Current presence + habitat survey", levels = levels(hist_q$shape))
+# 
+# # Verify that the levels are correct
+# print(levels(hist_q$shape))
+# print(levels(hist_pres$shape))
+# print(levels(curr_abs$shape))
+# print(levels(hab_abs$shape))
+# print(levels(curr_pres$shape))
+# print(levels(hab_pres$shape))
+# 
+# # Add color labels where necessary
+# hab_abs$color <- factor("Current absence + habitat survey")
+# hab_pres$color <- factor("Current presence + habitat survey")
+# 
+# shapes <- c(22, 22, 21, 21, 16, 21)
+# names(shapes) <- print(levels(hist_q$shape))
+
+
+
+# Ensure that shape levels are factors and print them to verify
+hist_q$shape <- factor("Questionable historical records", levels = c(
+  "Questionable historical records", "Historical presences", "Current absences", 
+  "Habitat surveys positive", "Current presences", "Habitat surveys negative"))
+hist_pres$shape <- factor("Historical presences", levels = levels(hist_q$shape))
+curr_abs$shape <- factor("Current absences", levels = levels(hist_q$shape))
+hab_abs$shape <- factor("Habitat surveys positive", levels = levels(hist_q$shape))
+curr_pres$shape <- factor("Current presences", levels = levels(hist_q$shape))
+hab_pres$shape <- factor("Habitat surveys negative", levels = levels(hist_q$shape))
+
+# Verify that the levels are correct
+print(levels(hist_q$shape))
+print(levels(hist_pres$shape))
+print(levels(curr_abs$shape))
+print(levels(hab_abs$shape))
+print(levels(curr_pres$shape))
+print(levels(hab_pres$shape))
+
+# Plot with the updated aesthetics
+ggplot() +
+  theme_classic() +
+  theme(axis.line = element_line(color = "grey10"),
+        panel.border = element_rect(color = "grey10", fill = NA)) +
+  geom_sf(data = model, fill = "lightgray", col = NA) +
+  geom_sf(data = me_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  geom_sf(data = nh_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  
+  ## Questionable historical records:
+  geom_point(data = hist_q,
+             aes(x = st_coordinates(hist_q)[,1],
+                 y = st_coordinates(hist_q)[,2],
+                 shape = shape), 
+             cex = 4.4,
+             stroke = 0.4,
+             fill = "white",
+             color = "black") +
+  
+  ## Historical presences:
+  geom_point(data = hist_pres,
+             aes(x = st_coordinates(hist_pres)[,1],
+                 y = st_coordinates(hist_pres)[,2],
+                 shape = shape), 
+             cex = 4.4,
+             stroke = 0.4,
+             fill = "gray40",
+             color = "black") +
+  
+  ## Current absences:
+  geom_point(data = curr_abs,
+             aes(x = st_coordinates(curr_abs)[,1],
+                 y = st_coordinates(curr_abs)[,2],
+                 shape = shape), 
+             cex = 3,
+             stroke = 0.4,
+             fill = "white",
+             color = "black") +
+  
+  ## Habitat surveys positive:
+  geom_point(data = hab_abs,
+             aes(x = st_coordinates(hab_abs)[,1],
+                 y = st_coordinates(hab_abs)[,2],
+                 shape = shape, color = color), 
+             cex = 3,
+             stroke = 0.6,
+             fill = "white") +
+  
+  ## Current presences:
+  geom_point(data = curr_pres,
+             aes(x = st_coordinates(curr_pres)[,1],
+                 y = st_coordinates(curr_pres)[,2],
+                 shape = shape), 
+             cex = 3,
+             color = "black") +
+  
+  ## Habitat surveys negative:
+  geom_point(data = hab_pres,
+             aes(x = st_coordinates(hab_pres)[,1],
+                 y = st_coordinates(hab_pres)[,2],
+                 shape = shape, color = color), 
+             cex = 3,
+             stroke = 0.6,
+             fill = "black") +
+  
+  coord_sf(datum = st_crs(curr)) +
+  xlab("Easting") +
+  ylab("Northing") +
+  scale_shape_manual(values = c("Questionable historical records" = 22, 
+                                "Historical presences" = 22, 
+                                "Current absences" = 21, 
+                                "Habitat surveys positive" = 21, 
+                                "Current presences" = 16, 
+                                "Habitat surveys negative" = 21)) +
+  scale_color_manual(values = c("Habitat surveys positive" = "blue", 
+                                "Habitat surveys negative" = "blue")) +
+  labs(shape = "Record Type", color = "Survey Results")
+
+```
+
+
+Map
+```{r fig.height=8}
+g1 <- ggplot() +
+  theme_classic() +
+  theme(axis.line = element_line(color = "grey10"),
+        panel.border = element_rect(color = "grey10", fill = NA)) +
+  geom_sf(data = model, fill = "lightgray", col = NA) +
+  geom_sf(data = me_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  geom_sf(data = nh_bnd, fill = NA, col = "black", linewidth = 0.1) +
+  ## Questionable historical records:
+  geom_point(data = hist_q,
+             cex = 4.4,
+             aes(x = st_coordinates(hist_q)[,1],
+                 y = st_coordinates(hist_q)[,2],
+                 shape = shape),
+             stroke = 0.4,
+             shape = 22,
+             fill = "white",
+             color = "black") +
+  ## Historical presences:
+  geom_point(data = hist_pres,
+             cex = 4.4,
+             aes(x = st_coordinates(hist_pres)[,1],
+                 y = st_coordinates(hist_pres)[,2],
+                 shape = shape),
+             stroke = 0.4,
+             shape = 22,
+             fill = "gray40",
+             color = "black") +
+  ## Current absences:
+  geom_point(data = curr_abs,
+             cex = 3,
+             aes(x = st_coordinates(curr_abs)[,1],
+                 y = st_coordinates(curr_abs)[,2],
+                 shape = shape),
+             stroke = 0.4,
+             shape = 21,
+             fill = "white",
+             color = "black") +  
+  ## Habitat surveys negative:
+  geom_point(data = hab_abs,
+             cex = 3,
+             aes(x = st_coordinates(hab_abs)[,1],
+                 y = st_coordinates(hab_abs)[,2],
+                 # shape = shape, 
+                 color = color),
+             stroke = 0.6,
+             shape = 21,
+             fill = "white") +
+  ## Current presences:
+  geom_point(data = curr_pres,
+             cex = 3,
+             aes(x = st_coordinates(curr_pres)[,1],
+                 y = st_coordinates(curr_pres)[,2],
+                 shape = shape),
+             shape = 16,
+             color = "black") +
+  ## Habitat surveys positive:
+  geom_point(data = hab_pres,
+             cex = 3,
+             aes(x = st_coordinates(hab_pres)[,1],
+                 y = st_coordinates(hab_pres)[,2],
+                 # shape = shape, 
+                 color = color),
+             stroke = 0.6,
+             shape = 21,
+             fill = "black") +
+  coord_sf(datum = st_crs(curr)) +
+  xlab("Easting") +
+  ylab("Northing") +
+  scale_shape_manual(values = shapes) +
+  scale_color_manual(values = c("Current absence + habitat survey" = "blue", 
+                                "Current presence + habitat survey" = "blue")) +
+  labs(shape = "Record Type", color = "Survey Results")
+g1
+```
