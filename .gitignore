@@ -10,6 +10,10 @@
 .RData
 .RDataTmp
 
+# Rasters or images
+.tif
+.JPG
+
 # CART results
 evaluations.csv
 full_dataset_evals.csv
