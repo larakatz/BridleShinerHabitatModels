@@ -1704,10 +1704,10 @@ st_write(hL.poly, "./biomod/hL_final_prediction.shp", append = FALSE) # save sha
 
 Shapefiles:
 ```{r}
-cS_poly <- st_read("./biomod/cS_final_prediction.shp")
-cL_poly <- st_read("./biomod/cL_final_prediction.shp")
-hS_poly <- st_read("./biomod/hS_final_prediction.shp")
-hL_poly <- st_read("./biomod/hL_final_prediction.shp")
+cS_poly <- st_read("./cS_final_prediction.shp")
+cL_poly <- st_read("./cL_final_prediction.shp")
+hS_poly <- st_read("./hS_final_prediction.shp")
+hL_poly <- st_read("./hL_final_prediction.shp")
 
 ## Current, small
 cS_poly_sum <- 
@@ -1801,7 +1801,7 @@ Create Maine boundary polygon:
 
 Maine statistics:
 ```{r}
-me_bnd <- st_read("./biomodSDM/Maine_boundary.shp")
+me_bnd <- st_read("./Maine_boundary.shp")
 
 ## Current, small:
 cS_me <- 
@@ -1990,8 +1990,8 @@ all_poly_pivot$hL <- all_poly_count$hL
 all_poly_pivot$cL <- all_poly_count$cL
 
 ## Save:
-write.csv(all_poly_sum, "./biomod/Tables/changes_in_area.csv", row.names = FALSE)
-write.csv(all_poly_pivot, "./biomod/Tables/changes_in_area_pivot.csv", row.names = FALSE)
+write.csv(all_poly_sum, "./Tables/changes_in_area.csv", row.names = FALSE)
+write.csv(all_poly_pivot, "./Tables/changes_in_area_pivot.csv", row.names = FALSE)
 ```
 
 ## Change in area
@@ -2002,8 +2002,8 @@ cS_change <- cS_poly %>% left_join(., st_drop_geometry(hS_poly), by = "huc") %>%
 
 cL_change <- cL_poly %>% left_join(., st_drop_geometry(hL_poly), by = "huc") %>% mutate(change = pred_occu.x - pred_occu.y) %>% dplyr::select(huc, change)
 
-st_write(cS_change, "./biomod/change_small_hucs.shp", append = FALSE)
-st_write(cL_change, "./biomod/change_large_hucs.shp", append = FALSE)
+st_write(cS_change, "./change_small_hucs.shp", append = FALSE)
+st_write(cL_change, "./change_large_hucs.shp", append = FALSE)
 ```
 
 ## Individual model evals
