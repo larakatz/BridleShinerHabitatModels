@@ -67,6 +67,7 @@ Read in bridle shiner presence-absence data and make sure that every site has a 
 # 
 # anyNA(occu$Occ) # this should be false
 ```
+
 Read in plant cover data. These values are in percentages so they need to be converted to proportions:
 ```{r}
 # Plant relative percent cover
@@ -123,7 +124,7 @@ Combine all habitat and occupancy variables into a dataframe:
 Import csv with Bridle Shiner (BDS) data:
 ```{r}
 bds <- read.csv("./BDS_Local_Covs.csv", header = TRUE)
-bds <- bds %>% dplyr::select(-X)
+# bds <- bds %>% dplyr::select(-X)
 bds$dom.substrate <- as.factor(bds$dom.substrate)
 bds$catchment <- as.factor(bds$catchment)
 bds$WBType <- as.factor(bds$WBType)
@@ -972,6 +973,4 @@ write.csv(top.model.test.eval, "./full_dataset_evals.csv")
 
 # References
 
-De’ath, G., and Fabricius, K.E. 2000. Classification and regression trees: A powerful yet simple technique for ecological data analysis. Ecology 81(11): 3178–3192. doi:10.1890/0012-9658(2000)081[3178:CARTAP]2.0.CO;2.
-
-Hallyburton, S., and Stark, W. 2023. Increasing detection sensitivity for rare and endangered species in Kansas through development of an aquatice environmental DNA sampling protocol. Transactions of the Kansas Academy of Science 126(1–2): 102–114. doi:10.1660/062.126.0115.
+De’ath, G., and Fabricius, K.E. 2000. Classification and regression trees: A powerful yet simple technique for ecological data analysis. Ecology 81(11): 3178–3192. https://doi.org/10.2307/177409.
