@@ -15,7 +15,6 @@ library(reshape) # for melt
 # install.packages("ggtext")
 library(ggtext) # for plotting biomod2 
 library(randomForest) # version 4.7-1.1
-library(reshape2)
 # install.packages("gam")
 # library(gam)
 library(parallel)

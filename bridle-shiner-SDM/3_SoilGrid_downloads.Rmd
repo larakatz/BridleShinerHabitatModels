@@ -26,16 +26,16 @@ library(gdalUtilities)
 library(raster)
 library(sf)
 library(dplyr)
-library(RColorBrewer)
-library(leaflet)
-library(leaflet.opacity)
-library(mapview)
+# library(RColorBrewer)
+# library(leaflet)
+# library(leaflet.opacity)
+# library(mapview)
 ```
 
 Make bounding box and get coordinates
 ```{r}
 # Bounding box 
-bbcoordsst <- st_read("./datos/BoundingBoxHomolosine.shp")
+bbcoordsst <- st_read("./BoundingBoxHomolosine.shp")
 igh='+proj=igh +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs' # proj string for Homolosine projection
 ne_igh <- st_transform(bbcoordsst, igh)
 
@@ -57,6 +57,7 @@ lry = bbox$ymin
 #     xmin     ymax     xmax     ymin 
 # -9137229  5390855 -8362878  4520021 
 ```
+
 SoilGrids maps have associated uncertainties as any product derived from a modelling approach. The prediction uncertainty is quantified by probability distributions. For each property and each standard depth interval this distribution is characterised by four parameters as follows:
 Q0.05 - 5% quantile;
 Q0.50 - median of the distribution;
@@ -79,7 +80,7 @@ quantile = "mean"
 Use the gdal_translate function to download the clay layer.
 ```{r}
 sg_url="/vsicurl/https://files.isric.org/soilgrids/latest/data/"
-lfile = "./datos/clay_ntest_igh_0_5.vrt"
+lfile = "./clay_ntest_igh_0_5.vrt"
 ```
 
 Obtain a VRT for the area of interest in the Homolosine projection. We suggest to use VRT for the intermediate steps to save space and computation times.

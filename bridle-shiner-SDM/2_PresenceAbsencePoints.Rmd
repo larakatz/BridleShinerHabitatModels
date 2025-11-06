@@ -18,7 +18,7 @@ library(oce) # long/lat to UTM
 
 # Get centroids
 
-```{r}
+```{r eval=FALSE}
 # polys <- vect("./RiverCentroidPolysNH.shp")
 # polys.p <- project(polys, "epsg:4326")
 # 
@@ -34,7 +34,7 @@ library(oce) # long/lat to UTM
 
 ## Maine 
 
-```{r}
+```{r eval=FALSE}
 hist.me1 <- read.csv("./BDSHistoricalRecords.csv", header = T)
 hist.me1[hist.me1$Year_Est == "Unknown",]$Year_Est <- -9999
 hist.me1[hist.me1$YearSamp == "Unknown",]$YearSamp <- -9999
@@ -51,7 +51,7 @@ hist.me1 <- hist.me1[-48,]
 ```
 
 
-```{r}
+```{r eval=FALSE}
 hist.me <- hist.me1[hist.me1$Year < 2011,]
 hist.me$Date <- lubridate::mdy(hist.me$Date)
 mdy(hist.me$Date)
@@ -62,7 +62,7 @@ hist.me <- hist.me[,c(1,16,2,3,4,17,18,5:8,10:15)] %>% dplyr::select(-cOccu,-CSt
 
 ## New Hampshire
 
-```{r}
+```{r eval=FALSE}
 all.nh <- read.csv("./NH_BS_data.csv", header = T)
 all.nh$Date <- lubridate::ymd(all.nh$Date)
 all.nh[all.nh$Site_Name == 0,]$Site_Name <- NA
@@ -70,7 +70,7 @@ all.nh$Year <- as.integer(all.nh$Year)
 ```
 
 
-```{r}
+```{r eval=FALSE}
 hist.nh1 <- all.nh[all.nh$Year < 2009,]
 unique(hist.nh1$Project)
 unique(hist.nh1$Water_Body)
@@ -78,7 +78,7 @@ unique(hist.nh1$Site_Name)
 hist.nh1[!is.na(hist.nh1$Site_Name) & hist.nh1$Site_Name == "Blacky's Cove",]$Site_Name <- "Blackey's Cove"
 hist.nh1[!is.na(hist.nh1$Site_Name) & hist.nh1$Site_Name == "",]$Site_Name <- NA
 ```
-```{r}
+```{r eval=FALSE}
 colnames(hist.nh1)
 hist.nh <- hist.nh1 %>% 
   select(ACT_ID,Date,Site_Name,Year,Water_Body,Lat_Start,Long_Start,Survey_location_description,Survey_comments,BS) %>% mutate(.,Date = Date, Year = Year, Water_Body=Water_Body,Site_Name=Site_Name,Site_code=ACT_ID,SiteHist=Survey_comments,x=Long_Start,y=Lat_Start,BS_Pres=BS,PointType = Survey_location_description) %>% select(-ACT_ID,-Lat_Start,-Long_Start)
@@ -114,7 +114,7 @@ hist.nh <- hist.nh[,c(16,3,1,17,4,10,11,18,2,8,9,12,14,15,13)] # same order as M
 
 ## Combined
 
-```{r}
+```{r eval=FALSE}
 hist.all <- rbind(hist.me,hist.nh)
 hist.all[hist.all$x == -9999,] <- NA # remove points with no coordinates
 hist.all <- hist.all[!is.na(hist.all$x),]

@@ -89,7 +89,7 @@ Export raster into R:
 
 Load shapefile of 200km buffer around Saco and Merrimack HUC6
 ```{r}
-range <- vect("./Inputs_raw/SacoMerrimackHUC6.shp")
+range <- vect("./SacoMerrimackHUC6.shp")
 range <- project(range, y = "epsg:26919") # EPSG for NAD83 / UTM Zone 19N
 range <- aggregate(range, dissolve = TRUE) # dissolve into 1 feature
 range.buff50 <- terra::buffer(range, 50000)
@@ -106,26 +106,23 @@ Use HUC10 polygons from Maine, New Hampshire, and New York within WBD01 and a 10
 ```{r}
 # Maine, NH, MA
 hucs_east1 <- st_read("WBD_01_HU2_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
-# hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 hucs_east <- hucs_east1[extent,] %>% st_union(.) %>% st_as_sf(.)
-# hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
 plot(hucs_east[1])
 
 # # NY, VT, MA
 # hucs_south1 <- st_read("./Shape/WBDHU10.shp") %>% st_transform(.,crs=st_crs(extent))
-# # hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 # hucs_south <- hucs_south1[extent,] %>% st_union(.) %>% st_as_sf(.)
-# # hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
 # plot(hucs_south[1])
-# # Massachusetts
-# # hucs_ma1 <- st_read("NHD_H_Massachusetts_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
-# # hucs_ma <- hucs_ma1[extent,] # within buffer
-# #   # st_union(.) %>% st_as_sf(.)
-# 
+
+# Massachusetts
+# hucs_ma1 <- st_read("NHD_H_Massachusetts_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
+# hucs_ma <- hucs_ma1[extent,] # within buffer
+#   # st_union(.) %>% st_as_sf(.)
+
 # hucs_west1 <- st_read("./WBD_04_HU2_Shape/Shape/WBDHU10.shp") %>% st_transform(.,crs=st_crs(extent))
 # # hucs_me2 <- st_read("NHD_H_Maine_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 # hucs_west <- hucs_west1[extent,] %>% st_union(.) %>% st_as_sf(.)
-# # hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in 
+# # hucs_me <- hucs_me[hucs_me$name != "Chaudiere River",] # only a tiny part of HUC in
 # plot(hucs_west[1])
 
 
@@ -133,20 +130,20 @@ plot(hucs_east[1])
 # hucs_nh1 <- st_read("NHD_H_New_Hampshire_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 # hucs_nh <- hucs_nh1[extent,] # within buffer
 #   # st_union(.) %>% st_as_sf(.)
-#   
+#
 # # New York
 # hucs_ny1 <- st_read("NHD_H_New_York_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 # hucs_ny <- hucs_ny1[extent,] # within buffer
-# # hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson") 
+# # hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson")
 #   # st_union(.) %>% st_as_sf(.)
-# 
+#
 # # Vermont
 # hucs_vt1 <- st_read("NHD_H_Vermont_State_GDB.gdb", layer="WBDHU10") %>% st_transform(.,crs=st_crs(extent))
 # hucs_vt <- hucs_vt1[extent,] # within buffer
-# hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson") 
+# hucs_ny <- hucs_ny %>% filter(name != "Lower Hudson")
   # st_union(.) %>% st_as_sf(.)
 
-hucs <- dplyr::bind_rows(list(hucs_south,hucs_west,hucs_east)) %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
+# hucs <- dplyr::bind_rows(list(hucs_south,hucs_west,hucs_east)) %>% st_union(.) %>% st_as_sf(.) %>% vect(.) %>% fillHoles(.)
 
 hucs <- hucs_east %>% vect(.) %>% fillHoles(.)
 plot(hucs)

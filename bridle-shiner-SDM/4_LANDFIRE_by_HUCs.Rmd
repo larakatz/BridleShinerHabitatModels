@@ -18,20 +18,12 @@ library(tidyverse)
 library(sf)
 library(ggplot2)
 library(ggspatial)
-library(terra)
-# library(leaflet)
-# library(mapview)
-# library(lmtest) # for BP test
-# library(tseries) # for Jarque-Bera test
-# library(car) # for avPlots
-# library(leaps)
-# library(spdep)
 ```
 
 # Create polygon of modeling area
 
 Load shapefile of historical range, change projection to UTM Zone 19N to match raster.
-```{r}
+```{r eval=FALSE}
 range <- vect("./Inputs_raw/SacoMerrimackHUC6.shp")
 range <- project(range, y = "epsg:26919") # EPSG for NAD83 / UTM Zone 19N
 range <- aggregate(range, dissolve = TRUE) # dissolve into 1 feature
@@ -40,70 +32,71 @@ plot(range)
 
 Make shapefiles of oceans, estuaries, and estuarine wetlands to omit from the model extent:
 ```{r}
-# Connecticut
-ocean.ct1 <- vect("NHD_H_Connecticut_State_GDB.gdb", layer="NHDArea")
-ocean.ct <- ocean.ct1[ocean.ct1$ftype == 445] # SeaOcean
-ocean.ct <- ocean.ct %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-# Massachusetts
-ocean.ma1 <- vect("NHD_H_Massachusetts_State_GDB.gdb", layer="NHDArea")
-ocean.ma <- ocean.ma1[ocean.ma1$ftype == 445] # SeaOcean
-ocean.ma <- ocean.ma %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-# Maine
-ocean.me1 <- vect("NHD_H_Maine_State_GDB.gdb", layer="NHDArea")
-ocean.me <- ocean.me1[ocean.me1$ftype == 445] # SeaOcean
-ocean.me <- ocean.me %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-# Rhode Island
-ocean.ri1 <- vect("NHD_H_Rhode_Island_State_GDB.gdb", layer="NHDArea")
-ocean.ri <- ocean.ri1[ocean.ri1$ftype == 445] # SeaOcean
-ocean.ri <- ocean.ri %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-# New York
-ocean.ny1 <- vect("NHD_H_New_York_State_GDB.gdb", layer="NHDArea")
-ocean.ny <- ocean.ny1[ocean.ny1$ftype == 445] # SeaOcean
-ocean.ny <- ocean.ny %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-# New Hampshire
-ocean.nh1 <- vect("NHD_H_New_Hampshire_State_GDB.gdb", layer="NHDArea")
-ocean.nh <- ocean.nh1[ocean.nh1$ftype == 445] # SeaOcean
-ocean.nh <- ocean.nh %>% 
-  project(.,y = "epsg:26919") %>% 
-  st_as_sf(.) %>% 
-  st_union(.) %>%
-  st_as_sf(.)
-
-salt <- dplyr::bind_rows(list(ocean.ct, ocean.me, ocean.ma, 
-                              ocean.ri, ocean.ny, ocean.nh)) %>%
-  st_union(.) %>% 
-  st_transform(., crs=26919) %>% 
-  st_as_sf(.) %>% 
-  vect(.) %>% 
-  fillHoles(.) # no islands
-plot(salt)
-
-writeVector(salt, "./Intermediate/Marine_habitats.shp", overwrite=TRUE)
+# # Connecticut
+# ocean.ct1 <- vect("NHD_H_Connecticut_State_GDB.gdb", layer="NHDArea")
+# ocean.ct <- ocean.ct1[ocean.ct1$ftype == 445] # SeaOcean
+# ocean.ct <- ocean.ct %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# # Massachusetts
+# ocean.ma1 <- vect("NHD_H_Massachusetts_State_GDB.gdb", layer="NHDArea")
+# ocean.ma <- ocean.ma1[ocean.ma1$ftype == 445] # SeaOcean
+# ocean.ma <- ocean.ma %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# # Maine
+# ocean.me1 <- vect("NHD_H_Maine_State_GDB.gdb", layer="NHDArea")
+# ocean.me <- ocean.me1[ocean.me1$ftype == 445] # SeaOcean
+# ocean.me <- ocean.me %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# # Rhode Island
+# ocean.ri1 <- vect("NHD_H_Rhode_Island_State_GDB.gdb", layer="NHDArea")
+# ocean.ri <- ocean.ri1[ocean.ri1$ftype == 445] # SeaOcean
+# ocean.ri <- ocean.ri %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# # New York
+# ocean.ny1 <- vect("NHD_H_New_York_State_GDB.gdb", layer="NHDArea")
+# ocean.ny <- ocean.ny1[ocean.ny1$ftype == 445] # SeaOcean
+# ocean.ny <- ocean.ny %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# # New Hampshire
+# ocean.nh1 <- vect("NHD_H_New_Hampshire_State_GDB.gdb", layer="NHDArea")
+# ocean.nh <- ocean.nh1[ocean.nh1$ftype == 445] # SeaOcean
+# ocean.nh <- ocean.nh %>% 
+#   project(.,y = "epsg:26919") %>% 
+#   st_as_sf(.) %>% 
+#   st_union(.) %>%
+#   st_as_sf(.)
+# 
+# salt <- dplyr::bind_rows(list(ocean.ct, ocean.me, ocean.ma, 
+#                               ocean.ri, ocean.ny, ocean.nh)) %>%
+#   st_union(.) %>% 
+#   st_transform(., crs=26919) %>% 
+#   st_as_sf(.) %>% 
+#   vect(.) %>% 
+#   fillHoles(.) # no islands
+# plot(salt)
+# 
+# writeVector(salt, "./Intermediate/Marine_habitats.shp", overwrite=TRUE)
+salt <- st_read("./Marine_habitats.shp")
 
 # ocean <- vect("./Inputs_raw/Coastline2.shp")
 # ocean <- fillHoles(ocean) %>% project(., y = "epsg:26919") %>% st_as_sf(.)
@@ -145,21 +138,21 @@ range.buff50.sf <- st_as_sf(range.buff50)
 # LANDFIRE raster preparation
 
 Load raster using `raster` package (so it can load the raster attribute table). Then convert to a SpatRaster in `terra`.
-```{r}
+```{r eval=FALSE}
 # biophys <- raster("./Inputs_raw/LANDFIRE/LC20_BPS_220.tif", RAT = T) # load raster with attribute table
 # biophys_t <- terra::rast(biophys) # convert to terra SpatRaster
 # plot(biophys_t)
 ```
 
 Project to NAD83 UTM Zone 19N
-```{r}
+```{r eval=FALSE}
 # biophys_p <- project(biophys_t, y = "epsg:26919")
 # cats_bps <- cats(biophys_p)[[1]] %>% dplyr::select(VALUE,BPS_NAME)
 # write.csv(cats_bps, "./landfire_cats.csv")
 ```
 
 Reclassify duplicate and triplicate landcover classes
-```{r}
+```{r eval=FALSE}
 # rcls <- read.csv("./Inputs_raw/rcls_values.csv", header = TRUE)
 # biophys_rcls <- classify(biophys_p, rcl = rcls)
 # levels(biophys_rcls) <- cats_bps 
@@ -172,7 +165,7 @@ Reclassify duplicate and triplicate landcover classes
 ```
 
 Set categories
-```{r}
+```{r eval=FALSE}
 # biophys_rcls <- raster("./Intermediate/biophys_rcls_30m.tif", RAT=TRUE) # load raster with attribute table
 # biophys_rcls_t <- terra::rast(biophys_rcls) # convert to terra SpatRaster
 # levels(biophys_rcls_t)[[1]] <- cats_bps # What data are included in the RAT?
@@ -181,7 +174,7 @@ Set categories
 ```
 
 Drop the `NoData` and `Fill-Not Mapped` categories.
-```{r}
+```{r eval=FALSE}
 # levels(biophys_rcls_t)
 # biophys_drop <- droplevels(biophys_rcls_t, layer=1)
 # levels(biophys_drop)
@@ -218,14 +211,14 @@ extent <- vect("./Inputs_vectors/all_hucs_extent.shp")
 ```
 
 Crop LANDFIRE raster to the outline of HUCs
-```{r}
+```{r eval=FALSE}
 # biophys_crop <- crop(biophys_drop, ext(extent)) # Crop to extent of HUC polygon layers
 ```
 
 Aggregate raster cells by cell value to save processing time
-```{r}
+```{r eval=FALSE}
 # original_res <- res(biophys_crop) # original cell size (30m x 30m)
-# target_res <- c(10,10) # larger cell size (90m x 90m)
+# target_res <- c(10,10) # larger cell size (300m x 300m)
 # 
 # agg_raster <- aggregate(biophys_crop,
 #                         fact = target_res,
@@ -1038,12 +1031,12 @@ State and model boundaries
 me_bnd <- st_read("./biomodSDM/Maine_boundary.shp")
 nh_bnd <- st_read("./Inputs_raw/New_Hampshire_Boundary_poly.shp")
 model <- st_read("./Intermediate/Model_extent.shp")
-# huc6 <- vect("./biomodSDM/SacoMerrimackHUC6.shp") %>% project(., y = "epsg:26919")
-# marine <- vect("./Intermediate/Marine_habitats.shp") %>% project(., y = "epsg:26919")
-# huc6.x <- huc6 %>% 
-#   erase(., marine) %>%  # erase using saltwater coastline features
-#   st_as_sf(.)
-# st_write(huc6.x, "./biomodSDM/SacoMerrimackHUC6_clip.shp")
+huc6 <- vect("./biomodSDM/SacoMerrimackHUC6.shp") %>% project(., y = "epsg:26919")
+marine <- vect("./Intermediate/Marine_habitats.shp") %>% project(., y = "epsg:26919")
+huc6.x <- huc6 %>%
+  erase(., marine) %>%  # erase using saltwater coastline features
+  st_as_sf(.)
+st_write(huc6.x, "./biomodSDM/SacoMerrimackHUC6_clip.shp")
 huc6.x <- st_read("./biomodSDM/SacoMerrimackHUC6_clip.shp")
 ```
 
