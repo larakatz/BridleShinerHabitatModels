@@ -792,7 +792,7 @@ sources <- c("Sources: (1) New Hampshire Fish and Game Department (NHFGD) n.d.; 
 
 all.sites.sourced <- rbind(all.sites, sources)
 
-write.csv(all.sites.sourced, "./Tables/SupplementD_TableSD1-update.csv")
+write.csv(all.sites.sourced, "./Tables/SupplementD_TableSD1-update.csv", row.names = FALSE)
 ```
 
 # Old code, ignore
